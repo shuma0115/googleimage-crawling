@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Image Crawling
 // @namespace    https://github.com/shuma0115/googleimage-crawling
-// @version      0.3.2
+// @version      0.3.3
 // @description  Auto collect original Google Images and download to images/ folder.
 // @match        https://www.google.com/*
 // @match        https://www.google.co.kr/*
@@ -1331,7 +1331,7 @@
       toggleBtn.addEventListener("click", () => {
         panel.classList.toggle("gi-collapsed");
         const collapsed = panel.classList.contains("gi-collapsed");
-        toggleBtn.textContent = collapsed ? "🗖" : "🗕";
+        toggleBtn.textContent = collapsed ? "🖼️" : "🗕";
         toggleBtn.title = collapsed ? "패널 펼치기" : "패널 접기";
       });
     }

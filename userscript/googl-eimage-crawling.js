@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Image Crawling
 // @namespace    https://github.com/shuma0115/googleimage-crawling
-// @version      0.3.6
+// @version      0.3.7
 // @description  Auto collect original Google Images and download to images/ folder.
 // @match        https://www.google.com/*
 // @match        https://www.google.co.kr/*
@@ -15,10 +15,11 @@
   "use strict";
 
   const state = {
-    urls: [],
     autoCollecting: false,
   };
   const STORAGE_KEY = "gi-local-settings";
+  const SESSION_KEY = "gi-local-session";
+  const AUTO_START_KEY = "gi-auto-start-pending";
 
   const sanitizeFilename = (value) =>
     (value || "")
@@ -96,6 +97,22 @@
   const saveSettings = (next) => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch (error) {
+      // ignore storage failures
+    }
+  };
+
+  const loadSessionState = () => {
+    try {
+      return JSON.parse(sessionStorage.getItem(SESSION_KEY) || "{}");
+    } catch (error) {
+      return {};
+    }
+  };
+
+  const saveSessionState = (next) => {
+    try {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
     } catch (error) {
       // ignore storage failures
     }
@@ -396,6 +413,13 @@
         <button class="gi-toggle" id="gi-toggle" type="button" title="패널 접기">🗕</button>
       </div>
       <div class="gi-row">
+        <label>검색어</label>
+        <div class="gi-checks">
+          <input id="gi-query" type="text" placeholder="키워드 입력" />
+          <button id="gi-search" type="button">검색</button>
+        </div>
+      </div>
+      <div class="gi-row">
         <label>저장 폴더</label>
         <input id="gi-path" type="text" placeholder="images" />
       </div>
@@ -412,6 +436,9 @@
           <label><input class="gi-ext" type="checkbox" value="webp" checked /> WEBP</label>
           <label><input class="gi-ext" type="checkbox" value="svg" /> SVG</label>
         </div>
+      </div>
+      <div class="gi-row gi-inline">
+        <label><input id="gi-auto-start" type="checkbox" /> 검색 후 자동 수집</label>
       </div>
       <div class="gi-row gi-inline">
         <label><input id="gi-auto-only" type="checkbox" /> 원본 자동 수집만 사용</label>
@@ -588,9 +615,12 @@
 
   const setupHandlers = () => {
     const pathInput = document.getElementById("gi-path");
+    const queryInput = document.getElementById("gi-query");
+    const searchBtn = document.getElementById("gi-search");
     const baseNameInput = document.getElementById("gi-basename");
     const extInputs = Array.from(document.querySelectorAll(".gi-ext"));
     const autoOnlyInput = document.getElementById("gi-auto-only");
+    const autoStartInput = document.getElementById("gi-auto-start");
     const debugInput = document.getElementById("gi-debug");
     const countsEl = document.getElementById("gi-counts");
     const statusEl = document.getElementById("gi-status");
@@ -601,6 +631,7 @@
 
     const settings = loadSettings();
     pathInput.value = settings.path || "images";
+    queryInput.value = settings.query || "";
     baseNameInput.value = settings.baseName || "image";
     if (Array.isArray(settings.extensions) && settings.extensions.length) {
       extInputs.forEach((input) => {
@@ -609,6 +640,9 @@
     }
     if (typeof settings.autoOnly === "boolean") {
       autoOnlyInput.checked = settings.autoOnly;
+    }
+    if (typeof settings.autoStart === "boolean") {
+      autoStartInput.checked = settings.autoStart;
     }
     if (settings.position && panel) {
       panel.style.top = `${settings.position.top}px`;
@@ -629,13 +663,19 @@
     const setStatus = (text) => {
       statusEl.textContent = text;
     };
+    const logDebug = (...args) => {
+      if (!debugInput.checked) return;
+      console.debug("[GI-IMG]", ...args);
+    };
 
-    let collectedCount = 0;
-    let downloadedCount = 0;
-    let filteredOutCount = 0;
+    const sessionState = loadSessionState();
+    let collectedCount = Number(sessionState.collectedCount) || 0;
+    let downloadedCount = Number(sessionState.downloadedCount) || 0;
+    let filteredOutCount = Number(sessionState.filteredOutCount) || 0;
     const updateCounts = () => {
       if (!countsEl) return;
       countsEl.textContent = `수집: ${collectedCount} / 다운로드: ${downloadedCount} / 필터 제외: ${filteredOutCount}`;
+      saveSessionState({ collectedCount, downloadedCount, filteredOutCount });
     };
 
     const getFilters = () => ({
@@ -648,11 +688,14 @@
       const filters = getFilters();
       const currentPath = pathInput.value.trim() || "images";
       const baseName = baseNameInput.value.trim() || "image";
+      const query = queryInput.value.trim();
       saveSettings({
         path: currentPath,
+        query,
         baseName,
         extensions: filters.extensions,
         autoOnly: autoOnlyInput.checked,
+        autoStart: autoStartInput.checked,
         collapsed: panel.classList.contains("gi-collapsed"),
         position:
           panel && panel.dataset.dragged === "true"
@@ -663,6 +706,7 @@
     };
 
     const downloadedUrls = new Set();
+    const seenUrls = new Set();
     const normalizeUrl = (value) => {
       try {
         const parsed = new URL(value);
@@ -732,8 +776,10 @@
       return `${base}/${name}`;
     };
 
-    const resolveOriginalUrl = async (url) => {
+    const resolveOriginalUrl = async (url, visited = new Set()) => {
       if (!url || typeof url !== "string") return "";
+      if (visited.has(url)) return url;
+      visited.add(url);
       if (url.startsWith("data:") || url.startsWith("blob:")) return url;
       if (isOriginalCandidate(url)) return url;
       try {
@@ -742,9 +788,9 @@
         if (contentType.includes("html")) {
           const text = new TextDecoder("utf-8").decode(response.buffer);
           const extracted = extractOriginalFromHtml(text);
-          if (extracted) return extracted;
+          if (extracted) return resolveOriginalUrl(extracted, visited);
           const ogImage = extractImageFromHtml(text, url);
-          if (ogImage) return ogImage;
+          if (ogImage) return resolveOriginalUrl(ogImage, visited);
         }
       } catch (error) {
         // ignore resolve failures
@@ -754,7 +800,7 @@
 
     const downloadOriginal = async (url, index, filters) => {
       const normalized = normalizeUrl(url);
-      if (downloadedUrls.has(normalized)) return "downloaded";
+      if (downloadedUrls.has(normalized)) return "skipped";
       if (
         /^https?:\/\/(encrypted-tbn0\.gstatic\.com|tbn0\.gstatic\.com)\//i.test(url) ||
         /^https?:\/\/lh3\.googleusercontent\.com\/ogw\//i.test(url)
@@ -887,11 +933,10 @@
 
     const addUrlToState = (url) => {
       if (!url) return false;
-      const next = new Set(state.urls);
-      const alreadyHad = next.has(url);
-      next.add(url);
-      state.urls = Array.from(next);
-      return !alreadyHad;
+      const normalized = normalizeUrl(url);
+      if (seenUrls.has(normalized)) return false;
+      seenUrls.add(normalized);
+      return true;
     };
 
     const isOriginalCandidate = (url) => {
@@ -1010,30 +1055,33 @@
 
     const collectFromViewer = async (thumb, fallbackUrl = "") => {
       const viewerUrl = await waitForViewerUrl();
-      const candidates = [];
-      if (viewerUrl) candidates.push(viewerUrl);
-      candidates.push(...getThumbCandidates(thumb, fallbackUrl));
-      const filteredCandidates = viewerUrl
-        ? candidates
-        : candidates.filter(
-            (value) =>
-              value &&
-              !value.startsWith("data:") &&
-              !value.startsWith("blob:") &&
-              !isThumbnailUrl(value)
-          );
+      logDebug("viewer url", viewerUrl || "(none)");
+      const candidates = viewerUrl ? [viewerUrl] : getThumbCandidates(thumb, fallbackUrl);
+      logDebug("candidates", candidates);
+      const filteredCandidates = candidates.filter(
+        (value) =>
+          value &&
+          !value.startsWith("blob:") &&
+          (!viewerUrl || !value.startsWith("data:")) &&
+          !isThumbnailUrl(value)
+      );
+      logDebug("filtered candidates", filteredCandidates);
       const seen = new Set();
       for (const candidate of filteredCandidates) {
         if (!candidate || seen.has(candidate)) continue;
         seen.add(candidate);
         const resolved = await resolveOriginalUrl(candidate);
+        logDebug("resolved url", resolved);
         if (isThumbnailUrl(resolved)) {
+          logDebug("skip thumbnail url", resolved);
           continue;
         }
         if (resolved.startsWith("data:") && getThumbSize(thumb) < 500) {
+          logDebug("skip small data url", resolved);
           continue;
         }
         if (!viewerUrl && resolved.startsWith("data:")) {
+          logDebug("skip data url without viewer", resolved);
           continue;
         }
         const added = addUrlToState(resolved);
@@ -1044,26 +1092,27 @@
         if (!passes) {
           filteredOutCount += 1;
           updateCounts();
+          logDebug("filtered by extension", resolved);
           return true;
         }
         const filters = getFilters();
-        const extForFilter = normalizeExtension(getUrlExtension(resolved));
-        if (filters.extensions.length) {
-          if (extForFilter && !filters.extensions.includes(extForFilter)) {
-            filteredOutCount += 1;
-            updateCounts();
-            return true;
-          }
-        }
         const result = await downloadOriginal(resolved, autoDownloadIndex, filters);
+        logDebug("download result", result, resolved);
         autoDownloadIndex += 1;
         if (result === "downloaded") {
           downloadedCount += 1;
           updateCounts();
           return true;
         }
-        filteredOutCount += 1;
-        updateCounts();
+        if (result === "filtered") {
+          filteredOutCount += 1;
+          updateCounts();
+          return true;
+        }
+        if (result !== "skipped") {
+          filteredOutCount += 1;
+          updateCounts();
+        }
         return true;
       }
       return false;
@@ -1108,10 +1157,11 @@
       panel?.classList.add("gi-collecting");
       autoCollectBtn.textContent = "자동 수집 중지";
       setStatus("수집 중");
+      logDebug("auto collect start");
       downloadedUrls.clear();
+      seenUrls.clear();
       usedNames.clear();
       autoDownloadIndex = 1;
-      state.urls = [];
       collectedCount = 0;
       downloadedCount = 0;
       filteredOutCount = 0;
@@ -1123,6 +1173,7 @@
         state.autoCollecting = false;
         panel?.classList.remove("gi-collecting");
         autoCollectBtn.textContent = "원본 자동 수집";
+        logDebug("no thumbnails found");
         return;
       }
 
@@ -1198,6 +1249,7 @@
       panel?.classList.remove("gi-collecting");
       autoCollectBtn.textContent = "원본 자동 수집";
       setStatus("대기 중");
+      logDebug("auto collect stop");
     };
 
     const stopAutoCollect = () => {
@@ -1205,18 +1257,20 @@
       panel?.classList.remove("gi-collecting");
       autoCollectBtn.textContent = "원본 자동 수집";
       setStatus("대기 중");
+      logDebug("auto collect stop");
     };
 
     const runCollect = async ({ silent = false } = {}) => {
+      if (state.autoCollecting) return;
       if (autoOnlyInput.checked) {
         if (!silent) {
           setStatus("원본 자동 수집만 사용 중입니다.");
         }
         return;
       }
-      state.urls = extractUrls();
+      const urls = extractUrls();
       if (!silent) {
-        const filteredCount = applyFilters(state.urls, getFilters()).length;
+        const filteredCount = applyFilters(urls, getFilters()).length;
         setStatus(`URL 수집 완료 (${filteredCount}개)`);
       }
     };
@@ -1238,18 +1292,43 @@
     [pathInput, baseNameInput].forEach((input) => {
       input.addEventListener("change", persistSettings);
     });
+    queryInput.addEventListener("input", persistSettings);
     autoOnlyInput.addEventListener("change", () => {
       if (autoOnlyInput.checked) {
-        state.urls = [];
         setStatus("원본 자동 수집만 사용 중입니다.");
       }
       persistSettings();
     });
+    autoStartInput.addEventListener("change", persistSettings);
     debugInput.addEventListener("change", persistSettings);
+    if (searchBtn && queryInput) {
+      const runSearch = () => {
+        const keyword = queryInput.value.trim();
+        if (!keyword) return;
+        persistSettings();
+        const url = new URL("/search", window.location.origin);
+        url.searchParams.set("udm", "2");
+        url.searchParams.set("q", keyword);
+        if (autoStartInput.checked) {
+          sessionStorage.setItem(AUTO_START_KEY, "1");
+        } else {
+          sessionStorage.removeItem(AUTO_START_KEY);
+        }
+        logDebug("run search", url.toString());
+        window.location.assign(url.toString());
+      };
+      searchBtn.addEventListener("click", runSearch);
+      queryInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          runSearch();
+        }
+      });
+    }
     const startDragging = (event, origin) => {
       if (!panel) return;
       panel.dataset.dragging = "true";
-      panel.dataset.dragged = "true";
+      dragMoved = false;
       const rect = panel.getBoundingClientRect();
       dragOffsetX = event.clientX - rect.left;
       dragOffsetY = event.clientY - rect.top;
@@ -1262,11 +1341,13 @@
     };
     const onMouseMove = (event) => {
       if (panel.dataset.dragging !== "true") return;
-      if (dragOrigin === "toggle") {
-        const moved =
-          Math.abs(event.clientX - dragStartX) + Math.abs(event.clientY - dragStartY) > 4;
-        if (moved) suppressToggleClick = true;
+      const moved =
+        Math.abs(event.clientX - dragStartX) + Math.abs(event.clientY - dragStartY) > 4;
+      if (moved && !dragMoved) {
+        dragMoved = true;
+        panel.dataset.dragged = "true";
       }
+      if (dragOrigin === "toggle" && moved) suppressToggleClick = true;
       const nextLeft = Math.max(0, event.clientX - dragOffsetX);
       const nextTop = Math.max(0, event.clientY - dragOffsetY);
       panel.style.left = `${nextLeft}px`;
@@ -1286,6 +1367,7 @@
     let dragStartY = 0;
     let dragOrigin = "";
     let suppressToggleClick = false;
+    let dragMoved = false;
     if (toggleBtn && panel) {
       toggleBtn.addEventListener("mousedown", (event) => {
         if (!panel.classList.contains("gi-collapsed")) {
@@ -1298,6 +1380,7 @@
       toggleBtn.addEventListener("click", () => {
         if (suppressToggleClick) {
           suppressToggleClick = false;
+          logDebug("toggle suppressed by drag");
           return;
         }
         const beforeRect = toggleBtn.getBoundingClientRect();
@@ -1319,6 +1402,7 @@
         panel.style.top = `${nextTop}px`;
         panel.style.right = "auto";
         persistSettings();
+        logDebug("toggle panel", collapsed ? "collapsed" : "expanded");
       });
     }
     if (header && panel) {
@@ -1330,12 +1414,34 @@
 
     runCollect({ silent: true });
     updateCounts();
+    window.addEventListener("beforeunload", () => {
+      saveSessionState({ collectedCount, downloadedCount, filteredOutCount });
+    });
     let scrollTimer;
     window.addEventListener("scroll", () => {
+      if (state.autoCollecting) return;
       if (autoOnlyInput.checked) return;
       clearTimeout(scrollTimer);
       scrollTimer = setTimeout(() => runCollect({ silent: true }), 400);
     });
+    if (autoStartInput.checked && !state.autoCollecting) {
+      try {
+        const url = new URL(window.location.href);
+        const isSearchPage = url.pathname === "/search";
+        const isImageSearch = url.searchParams.get("udm") === "2" || url.searchParams.get("tbm") === "isch";
+        if (isSearchPage && isImageSearch) {
+          const autoStartPending = sessionStorage.getItem(AUTO_START_KEY) === "1";
+          if (!autoStartPending) return;
+          sessionStorage.removeItem(AUTO_START_KEY);
+          setTimeout(() => {
+            if (!state.autoCollecting) startAutoCollect();
+          }, 500);
+          logDebug("auto start scheduled");
+        }
+      } catch (error) {
+        // ignore url parse failures
+      }
+    }
   };
 
   const init = () => {
@@ -1349,9 +1455,45 @@
     setupHandlers();
   };
 
+  const installPageHooks = () => {
+    if (window.__giHooksInstalled) return;
+    window.__giHooksInstalled = true;
+
+    const ensurePanel = () => {
+      if (!document.getElementById("gi-local-panel")) {
+        init();
+      }
+    };
+
+    window.addEventListener("popstate", () => {
+      setTimeout(ensurePanel, 50);
+    });
+
+    ["pushState", "replaceState"].forEach((method) => {
+      const original = history[method];
+      if (typeof original !== "function") return;
+      history[method] = function (...args) {
+        const result = original.apply(this, args);
+        setTimeout(ensurePanel, 50);
+        return result;
+      };
+    });
+
+    const observer = new MutationObserver(() => {
+      if (!document.getElementById("gi-local-panel")) {
+        init();
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  };
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+    document.addEventListener("DOMContentLoaded", () => {
+      init();
+      installPageHooks();
+    });
   } else {
     init();
+    installPageHooks();
   }
 })();

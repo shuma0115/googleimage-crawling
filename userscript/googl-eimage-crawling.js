@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Image Crawling
 // @namespace    https://github.com/shuma0115/googleimage-crawling
-// @version      0.3.4
+// @version      0.3.5
 // @description  Auto collect original Google Images and download to images/ folder.
 // @match        https://www.google.com/*
 // @match        https://www.google.co.kr/*

@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Google Image Crawling
 // @namespace    https://github.com/shuma0115/googleimage-crawling
-// @version      0.3.5
+// @version      0.3.6
 // @description  Auto collect original Google Images and download to images/ folder.
 // @match        https://www.google.com/*
 // @match        https://www.google.co.kr/*
 // @match        https://images.google.com/*
 // @grant        GM_download
 // @grant        GM_xmlhttpRequest
-// @grant        GM_setClipboard
 // @connect      *
 // ==/UserScript==
 
@@ -17,8 +16,6 @@
 
   const state = {
     urls: [],
-    filtered: [],
-    running: false,
     autoCollecting: false,
   };
   const STORAGE_KEY = "gi-local-settings";
@@ -102,27 +99,6 @@
     } catch (error) {
       // ignore storage failures
     }
-  };
-
-  const guessExtension = (url, contentType) => {
-    if (contentType) {
-      if (contentType.includes("png")) return "png";
-      if (contentType.includes("gif")) return "gif";
-      if (contentType.includes("webp")) return "webp";
-      if (contentType.includes("bmp")) return "bmp";
-      if (contentType.includes("svg")) return "svg";
-      if (contentType.includes("jpeg") || contentType.includes("jpg")) return "jpg";
-    }
-    try {
-      const path = new URL(url).pathname;
-      const last = path.split("/").pop();
-      if (last && last.includes(".")) {
-        return last.split(".").pop().slice(0, 4);
-      }
-    } catch (error) {
-      return "jpg";
-    }
-    return "jpg";
   };
 
   const normalizeExtension = (value) => {
@@ -412,9 +388,11 @@
   const createPanel = () => {
     const panel = document.createElement("div");
     panel.id = "gi-local-panel";
+    panel.dataset.dragging = "false";
+    panel.dataset.dragged = "false";
     panel.innerHTML = `
       <div class="gi-header">
-        <div class="gi-title">로컬 이미지 저장 도구</div>
+        <div class="gi-title">구글 이미지 저장 도구</div>
         <button class="gi-toggle" id="gi-toggle" type="button" title="패널 접기">🗕</button>
       </div>
       <div class="gi-row">
@@ -477,6 +455,8 @@
         justify-content: space-between;
         gap: 8px;
         margin-bottom: 12px;
+        cursor: move;
+        user-select: none;
       }
       #gi-local-panel .gi-header .gi-title {
         margin-bottom: 0;
@@ -490,6 +470,21 @@
         font-size: 12px;
         line-height: 1;
         cursor: pointer;
+      }
+      #gi-local-panel.gi-collapsed .gi-toggle {
+        border-radius: 999px;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+      }
+      #gi-local-panel.gi-collapsed.gi-collecting .gi-toggle {
+        animation: giPulse 1.4s ease-in-out infinite;
+        background: radial-gradient(circle at 30% 30%, #7dd3fc, #38bdf8 60%, #0ea5e9);
+        box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.6);
       }
       #gi-local-panel .gi-row {
         display: grid;
@@ -542,8 +537,18 @@
       #gi-local-panel.gi-collapsed .gi-row,
       #gi-local-panel.gi-collapsed .gi-actions,
       #gi-local-panel.gi-collapsed .gi-counts,
-      #gi-local-panel.gi-collapsed .gi-status {
+      #gi-local-panel.gi-collapsed .gi-status,
+      #gi-local-panel.gi-collapsed .gi-title {
         display: none;
+      }
+      #gi-local-panel.gi-collapsed .gi-header {
+        justify-content: flex-end;
+      }
+      #gi-local-panel.gi-collapsed {
+        background: transparent;
+        box-shadow: none;
+        padding: 0;
+        width: auto;
       }
       #gi-local-panel button {
         border: none;
@@ -563,6 +568,20 @@
         font-size: 12px;
         color: #cbd5f5;
       }
+      @keyframes giPulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.6);
+          transform: scale(1);
+        }
+        70% {
+          box-shadow: 0 0 0 10px rgba(56, 189, 248, 0);
+          transform: scale(1.05);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+          transform: scale(1);
+        }
+      }
     `;
     document.head.appendChild(style);
   };
@@ -578,6 +597,7 @@
     const autoCollectBtn = document.getElementById("gi-auto-collect");
     const toggleBtn = document.getElementById("gi-toggle");
     const panel = document.getElementById("gi-local-panel");
+    const header = panel?.querySelector(".gi-header");
 
     const settings = loadSettings();
     pathInput.value = settings.path || "images";
@@ -589,6 +609,18 @@
     }
     if (typeof settings.autoOnly === "boolean") {
       autoOnlyInput.checked = settings.autoOnly;
+    }
+    if (settings.position && panel) {
+      panel.style.top = `${settings.position.top}px`;
+      panel.style.right = "auto";
+      panel.style.left = `${settings.position.left}px`;
+      panel.dataset.dragged = "true";
+    }
+    if (typeof settings.collapsed === "boolean" && panel) {
+      panel.classList.toggle("gi-collapsed", settings.collapsed);
+      const collapsed = panel.classList.contains("gi-collapsed");
+      toggleBtn.textContent = collapsed ? "🖼️" : "🗕";
+      toggleBtn.title = collapsed ? "패널 펼치기" : "패널 접기";
     }
     if (typeof settings.debug === "boolean") {
       debugInput.checked = settings.debug;
@@ -606,11 +638,6 @@
       countsEl.textContent = `수집: ${collectedCount} / 다운로드: ${downloadedCount} / 필터 제외: ${filteredOutCount}`;
     };
 
-    const setRunning = (running) => {
-      state.running = running;
-      autoCollectBtn.disabled = running;
-    };
-
     const getFilters = () => ({
       extensions: extInputs
         .filter((input) => input.checked)
@@ -626,11 +653,14 @@
         baseName,
         extensions: filters.extensions,
         autoOnly: autoOnlyInput.checked,
+        collapsed: panel.classList.contains("gi-collapsed"),
+        position:
+          panel && panel.dataset.dragged === "true"
+            ? { top: panel.offsetTop, left: panel.offsetLeft }
+            : undefined,
         debug: debugInput.checked,
       });
     };
-
-    const getFilteredTargets = (urls = state.urls) => applyFilters(urls, getFilters());
 
     const downloadedUrls = new Set();
     const normalizeUrl = (value) => {
@@ -855,17 +885,12 @@
       return "failed";
     };
 
-    const addUrlToState = (url, { respectFilter = false } = {}) => {
+    const addUrlToState = (url) => {
       if (!url) return false;
-      const passes = applyFilters([url], getFilters()).length > 0;
       const next = new Set(state.urls);
       const alreadyHad = next.has(url);
       next.add(url);
       state.urls = Array.from(next);
-      state.filtered = getFilteredTargets(state.urls);
-      if (respectFilter) {
-        return !alreadyHad && passes;
-      }
       return !alreadyHad;
     };
 
@@ -979,16 +1004,38 @@
       return [...ordered, ...filteredThumbs];
     };
 
+    const isThumbnailUrl = (value) =>
+      /^https?:\/\/(encrypted-tbn0\.gstatic\.com|tbn0\.gstatic\.com)\//i.test(value || "") ||
+      /^https?:\/\/lh3\.googleusercontent\.com\/ogw\//i.test(value || "");
+
     const collectFromViewer = async (thumb, fallbackUrl = "") => {
       const viewerUrl = await waitForViewerUrl();
       const candidates = [];
       if (viewerUrl) candidates.push(viewerUrl);
       candidates.push(...getThumbCandidates(thumb, fallbackUrl));
+      const filteredCandidates = viewerUrl
+        ? candidates
+        : candidates.filter(
+            (value) =>
+              value &&
+              !value.startsWith("data:") &&
+              !value.startsWith("blob:") &&
+              !isThumbnailUrl(value)
+          );
       const seen = new Set();
-      for (const candidate of candidates) {
+      for (const candidate of filteredCandidates) {
         if (!candidate || seen.has(candidate)) continue;
         seen.add(candidate);
         const resolved = await resolveOriginalUrl(candidate);
+        if (isThumbnailUrl(resolved)) {
+          continue;
+        }
+        if (resolved.startsWith("data:") && getThumbSize(thumb) < 500) {
+          continue;
+        }
+        if (!viewerUrl && resolved.startsWith("data:")) {
+          continue;
+        }
         const added = addUrlToState(resolved);
         if (!added) continue;
         collectedCount += 1;
@@ -1058,8 +1105,13 @@
     const startAutoCollect = async () => {
       if (state.autoCollecting) return;
       state.autoCollecting = true;
+      panel?.classList.add("gi-collecting");
       autoCollectBtn.textContent = "자동 수집 중지";
       setStatus("수집 중");
+      downloadedUrls.clear();
+      usedNames.clear();
+      autoDownloadIndex = 1;
+      state.urls = [];
       collectedCount = 0;
       downloadedCount = 0;
       filteredOutCount = 0;
@@ -1069,6 +1121,7 @@
       if (!thumbs.length) {
         setStatus("썸네일을 찾지 못했습니다. 스크롤 후 다시 시도해주세요.");
         state.autoCollecting = false;
+        panel?.classList.remove("gi-collecting");
         autoCollectBtn.textContent = "원본 자동 수집";
         return;
       }
@@ -1142,155 +1195,16 @@
       }
 
       state.autoCollecting = false;
+      panel?.classList.remove("gi-collecting");
       autoCollectBtn.textContent = "원본 자동 수집";
       setStatus("대기 중");
     };
 
     const stopAutoCollect = () => {
       state.autoCollecting = false;
+      panel?.classList.remove("gi-collecting");
       autoCollectBtn.textContent = "원본 자동 수집";
       setStatus("대기 중");
-    };
-
-    const runDownload = async (targets) => {
-      if (state.running) return;
-      if (!targets.length) {
-        setStatus("필터에 맞는 URL이 없습니다.");
-        return;
-      }
-
-      const sliced = targets.slice(0);
-
-      setRunning(true);
-      setStatus(`다운로드 시작 (0/${sliced.length})`);
-
-      let success = 0;
-      const usedNames = new Map();
-      const buildFilename = (url, index, ext) => {
-        const baseName = sanitizeFilename(baseNameInput.value.trim() || "image");
-        if (baseName) {
-          return `${baseName}-${String(index).padStart(4, "0")}.${ext}`;
-        }
-        try {
-          const parsed = new URL(url);
-          const last = parsed.pathname.split("/").pop() || "";
-          if (last) {
-            const base = sanitizeFilename(decodeURIComponent(last));
-            if (base) {
-              if (base.toLowerCase().endsWith(`.${ext}`)) {
-                return base;
-              }
-              return `${base}.${ext}`;
-            }
-          }
-        } catch (error) {
-          // ignore parse failures
-        }
-        return `${String(index).padStart(3, "0")}.${ext}`;
-      };
-
-      const ensureUniqueName = (name) => {
-        const key = name.toLowerCase();
-        const count = usedNames.get(key) || 0;
-        usedNames.set(key, count + 1);
-        if (!count) return name;
-        const dot = name.lastIndexOf(".");
-        const suffix = `_${count + 1}`;
-        if (dot > 0) {
-          return `${name.slice(0, dot)}${suffix}${name.slice(dot)}`;
-        }
-        return `${name}${suffix}`;
-      };
-
-      try {
-        for (let i = 0; i < sliced.length; i += 1) {
-          const url = sliced[i];
-          try {
-            if (url.startsWith("data:")) {
-              const commaIndex = url.indexOf(",");
-              const meta = url.slice(0, commaIndex);
-              if (!/^data:\s*image\//i.test(meta)) {
-                setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
-                continue;
-              }
-              const base64 = meta.includes(";base64");
-              const data = url.slice(commaIndex + 1);
-              const bytes = base64 ? atob(data) : decodeURIComponent(data);
-              const buffer = new Uint8Array(bytes.length);
-              for (let j = 0; j < bytes.length; j += 1) {
-                buffer[j] = bytes.charCodeAt(j);
-              }
-              const mimeMatch = meta.match(/^data:\s*([^;,]+)/i);
-              const mimeType = mimeMatch ? mimeMatch[1] : "";
-              const ext = extensionFromContentType(mimeType);
-              const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
-              saveBlob(new Blob([buffer], { type: mimeType }), getDownloadPath(filename));
-              success += 1;
-              setStatus(`다운로드 중 (${success}/${sliced.length})`);
-              continue;
-            }
-            if (url.startsWith("blob:")) {
-              const response = await fetch(url);
-              const blob = await response.blob();
-              let ext = extensionFromContentType(blob.type || "");
-              if (!ext) {
-                const buffer = new Uint8Array(await blob.arrayBuffer());
-                ext = sniffImageExtension(buffer);
-                if (!ext) {
-                  setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
-                  continue;
-                }
-              }
-              const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
-              saveBlob(blob, getDownloadPath(filename));
-              success += 1;
-              setStatus(`다운로드 중 (${success}/${sliced.length})`);
-              continue;
-            }
-            const { buffer, contentType } = await fetchBinary(url);
-            if (contentType.includes("html")) {
-              setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
-              continue;
-            }
-            const data = buffer ? new Uint8Array(buffer) : null;
-            if (!data || !data.byteLength) {
-              setStatus(`빈 파일 건너뜀: ${i + 1}/${sliced.length}`);
-              continue;
-            }
-            const extFromType = extensionFromContentType(contentType);
-            const extFromUrl = getUrlExtension(url);
-            const extFromSniff = sniffImageExtension(data);
-            const allowOctet = contentType.includes("octet-stream") && (extFromUrl || extFromSniff);
-            const isImageData =
-              isImageContentType(contentType) || Boolean(extFromSniff) || Boolean(allowOctet);
-            if (!isImageData) {
-              setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
-              continue;
-            }
-            const ext = extFromType || extFromUrl || extFromSniff || "jpg";
-            const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
-            const blobType =
-              (isImageContentType(contentType) && contentType) ||
-              (extFromSniff ? `image/${extFromSniff}` : "") ||
-              "";
-            const blob = new Blob([data], { type: blobType || "application/octet-stream" });
-            saveBlob(blob, getDownloadPath(filename));
-            success += 1;
-            setStatus(`다운로드 중 (${success}/${sliced.length})`);
-          } catch (error) {
-            setStatus(`다운로드 실패: ${i + 1}/${sliced.length}`);
-          }
-        }
-
-        if (!success) {
-          setStatus("다운로드할 이미지가 없습니다.");
-          return;
-        }
-
-        setStatus(`완료: ${success}/${sliced.length}개 저장`);
-      } finally {
-        setRunning(false);
-      }
     };
 
     const runCollect = async ({ silent = false } = {}) => {
@@ -1301,9 +1215,9 @@
         return;
       }
       state.urls = extractUrls();
-      state.filtered = getFilteredTargets(state.urls);
       if (!silent) {
-        setStatus(`URL 수집 완료 (${state.filtered.length}개)`);
+        const filteredCount = applyFilters(state.urls, getFilters()).length;
+        setStatus(`URL 수집 완료 (${filteredCount}개)`);
       }
     };
 
@@ -1315,14 +1229,8 @@
       startAutoCollect();
     });
 
-    const refreshFiltered = () => {
-      if (!state.urls.length) return;
-      state.filtered = getFilteredTargets(state.urls);
-    };
-
     extInputs.forEach((input) => {
       input.addEventListener("change", () => {
-        refreshFiltered();
         persistSettings();
       });
     });
@@ -1333,18 +1241,90 @@
     autoOnlyInput.addEventListener("change", () => {
       if (autoOnlyInput.checked) {
         state.urls = [];
-        state.filtered = [];
         setStatus("원본 자동 수집만 사용 중입니다.");
       }
       persistSettings();
     });
     debugInput.addEventListener("change", persistSettings);
+    const startDragging = (event, origin) => {
+      if (!panel) return;
+      panel.dataset.dragging = "true";
+      panel.dataset.dragged = "true";
+      const rect = panel.getBoundingClientRect();
+      dragOffsetX = event.clientX - rect.left;
+      dragOffsetY = event.clientY - rect.top;
+      dragStartX = event.clientX;
+      dragStartY = event.clientY;
+      dragOrigin = origin;
+      suppressToggleClick = false;
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", stopDragging);
+    };
+    const onMouseMove = (event) => {
+      if (panel.dataset.dragging !== "true") return;
+      if (dragOrigin === "toggle") {
+        const moved =
+          Math.abs(event.clientX - dragStartX) + Math.abs(event.clientY - dragStartY) > 4;
+        if (moved) suppressToggleClick = true;
+      }
+      const nextLeft = Math.max(0, event.clientX - dragOffsetX);
+      const nextTop = Math.max(0, event.clientY - dragOffsetY);
+      panel.style.left = `${nextLeft}px`;
+      panel.style.top = `${nextTop}px`;
+      panel.style.right = "auto";
+    };
+    const stopDragging = () => {
+      if (panel.dataset.dragging !== "true") return;
+      panel.dataset.dragging = "false";
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", stopDragging);
+      persistSettings();
+    };
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let dragOrigin = "";
+    let suppressToggleClick = false;
     if (toggleBtn && panel) {
+      toggleBtn.addEventListener("mousedown", (event) => {
+        if (!panel.classList.contains("gi-collapsed")) {
+          event.stopPropagation();
+          return;
+        }
+        event.stopPropagation();
+        startDragging(event, "toggle");
+      });
       toggleBtn.addEventListener("click", () => {
+        if (suppressToggleClick) {
+          suppressToggleClick = false;
+          return;
+        }
+        const beforeRect = toggleBtn.getBoundingClientRect();
+        const targetCenterX = beforeRect.left + beforeRect.width / 2;
+        const targetCenterY = beforeRect.top + beforeRect.height / 2;
         panel.classList.toggle("gi-collapsed");
         const collapsed = panel.classList.contains("gi-collapsed");
         toggleBtn.textContent = collapsed ? "🖼️" : "🗕";
         toggleBtn.title = collapsed ? "패널 펼치기" : "패널 접기";
+        const afterBtnRect = toggleBtn.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+        const currentCenterX = afterBtnRect.left + afterBtnRect.width / 2;
+        const currentCenterY = afterBtnRect.top + afterBtnRect.height / 2;
+        const deltaX = targetCenterX - currentCenterX;
+        const deltaY = targetCenterY - currentCenterY;
+        const nextLeft = Math.max(0, panelRect.left + deltaX);
+        const nextTop = Math.max(0, panelRect.top + deltaY);
+        panel.style.left = `${nextLeft}px`;
+        panel.style.top = `${nextTop}px`;
+        panel.style.right = "auto";
+        persistSettings();
+      });
+    }
+    if (header && panel) {
+      header.addEventListener("mousedown", (event) => {
+        if (event.target && event.target.closest(".gi-toggle")) return;
+        startDragging(event, "header");
       });
     }
 
@@ -1352,7 +1332,6 @@
     updateCounts();
     let scrollTimer;
     window.addEventListener("scroll", () => {
-      if (state.running) return;
       if (autoOnlyInput.checked) return;
       clearTimeout(scrollTimer);
       scrollTimer = setTimeout(() => runCollect({ silent: true }), 400);

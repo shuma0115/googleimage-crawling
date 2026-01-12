@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Image Crawling
 // @namespace    https://github.com/shuma0115/googleimage-crawling
-// @version      0.3.1
+// @version      0.3.2
 // @description  Auto collect original Google Images and download to images/ folder.
 // @match        https://www.google.com/*
 // @match        https://www.google.co.kr/*
@@ -211,6 +211,12 @@
     });
   };
 
+  const isExtensionAllowed = (filters, ext) => {
+    const normalized = normalizeExtension(ext);
+    if (!filters.extensions.length || !normalized) return true;
+    return filters.extensions.includes(normalized);
+  };
+
   const extractUrls = () => {
     const urls = new Set();
     const addUrl = (value) => {
@@ -403,11 +409,15 @@
     panel.innerHTML = `
       <div class="gi-header">
         <div class="gi-title">로컬 이미지 저장 도구</div>
-        <button class="gi-toggle" id="gi-toggle" type="button">_</button>
+        <button class="gi-toggle" id="gi-toggle" type="button" title="패널 접기">🗕</button>
       </div>
       <div class="gi-row">
         <label>저장 폴더</label>
         <input id="gi-path" type="text" placeholder="images" />
+      </div>
+      <div class="gi-row">
+        <label>파일명 접두어</label>
+        <input id="gi-basename" type="text" placeholder="image" />
       </div>
       <div class="gi-row">
         <label>확장자 필터</label>
@@ -418,6 +428,9 @@
           <label><input class="gi-ext" type="checkbox" value="webp" checked /> WEBP</label>
           <label><input class="gi-ext" type="checkbox" value="svg" /> SVG</label>
         </div>
+      </div>
+      <div class="gi-row gi-inline">
+        <label><input id="gi-auto-only" type="checkbox" /> 원본 자동 수집만 사용</label>
       </div>
       <div class="gi-row gi-inline">
         <label><input id="gi-debug" type="checkbox" /> 실패 URL 로그 출력</label>
@@ -550,7 +563,9 @@
 
   const setupHandlers = () => {
     const pathInput = document.getElementById("gi-path");
+    const baseNameInput = document.getElementById("gi-basename");
     const extInputs = Array.from(document.querySelectorAll(".gi-ext"));
+    const autoOnlyInput = document.getElementById("gi-auto-only");
     const debugInput = document.getElementById("gi-debug");
     const countsEl = document.getElementById("gi-counts");
     const statusEl = document.getElementById("gi-status");
@@ -560,10 +575,14 @@
 
     const settings = loadSettings();
     pathInput.value = settings.path || "images";
+    baseNameInput.value = settings.baseName || "image";
     if (Array.isArray(settings.extensions) && settings.extensions.length) {
       extInputs.forEach((input) => {
         input.checked = settings.extensions.includes(input.value);
       });
+    }
+    if (typeof settings.autoOnly === "boolean") {
+      autoOnlyInput.checked = settings.autoOnly;
     }
     if (typeof settings.debug === "boolean") {
       debugInput.checked = settings.debug;
@@ -595,9 +614,12 @@
     const persistSettings = () => {
       const filters = getFilters();
       const currentPath = pathInput.value.trim() || "images";
+      const baseName = baseNameInput.value.trim() || "image";
       saveSettings({
         path: currentPath,
+        baseName,
         extensions: filters.extensions,
+        autoOnly: autoOnlyInput.checked,
         debug: debugInput.checked,
       });
     };
@@ -634,6 +656,10 @@
 
     const buildFilename = (url, index, extHint = "") => {
       const ext = normalizeExtension(extHint) || getUrlExtension(url) || "jpg";
+      const baseName = sanitizeFilename(baseNameInput.value.trim() || "image");
+      if (baseName) {
+        return ensureUniqueName(`${baseName}-${String(index).padStart(4, "0")}.${ext}`);
+      }
       try {
         const parsed = new URL(url);
         const last = parsed.pathname.split("/").pop() || "";
@@ -690,14 +716,14 @@
       return url;
     };
 
-    const downloadOriginal = async (url, index) => {
+    const downloadOriginal = async (url, index, filters) => {
       const normalized = normalizeUrl(url);
-      if (downloadedUrls.has(normalized)) return false;
+      if (downloadedUrls.has(normalized)) return "downloaded";
       if (url.startsWith("data:")) {
         try {
           const commaIndex = url.indexOf(",");
           const meta = url.slice(0, commaIndex);
-          if (!/^data:\s*image\//i.test(meta)) return false;
+          if (!/^data:\s*image\//i.test(meta)) return "failed";
           const base64 = meta.includes(";base64");
           const data = url.slice(commaIndex + 1);
           const bytes = base64 ? atob(data) : decodeURIComponent(data);
@@ -707,13 +733,14 @@
           }
           const mimeType = meta.replace(/^data:\s*/i, "");
           const ext = extensionFromContentType(mimeType);
+          if (!isExtensionAllowed(filters, ext)) return "filtered";
           const name = buildFilename(url, index, ext);
           const path = getDownloadPath(name);
           saveBlob(new Blob([buffer], { type: mimeType }), path);
           downloadedUrls.add(normalized);
-          return true;
+          return "downloaded";
         } catch (error) {
-          return false;
+          return "failed";
         }
       }
       if (url.startsWith("blob:")) {
@@ -724,15 +751,16 @@
           if (!ext) {
             const buffer = new Uint8Array(await blob.arrayBuffer());
             ext = sniffImageExtension(buffer);
-            if (!ext) return false;
+            if (!ext) return "failed";
           }
+          if (!isExtensionAllowed(filters, ext)) return "filtered";
           const name = buildFilename(url, index, ext);
           const path = getDownloadPath(name);
           saveBlob(blob, path);
           downloadedUrls.add(normalized);
-          return true;
+          return "downloaded";
         } catch (error) {
-          return false;
+          return "failed";
         }
       }
       try {
@@ -741,24 +769,26 @@
           const text = new TextDecoder("utf-8").decode(buffer);
           const extracted = extractOriginalFromHtml(text);
           if (extracted && extracted !== url) {
-            return downloadOriginal(extracted, index);
+            return downloadOriginal(extracted, index, filters);
           }
           const ogImage = extractImageFromHtml(text, url);
           if (ogImage && ogImage !== url) {
-            return downloadOriginal(ogImage, index);
+            return downloadOriginal(ogImage, index, filters);
           }
-          return false;
+          return "failed";
         }
         const data = buffer ? new Uint8Array(buffer) : null;
-        if (!data || !data.byteLength) return false;
+        if (!data || !data.byteLength) return "failed";
         const extFromType = extensionFromContentType(contentType);
         const extFromUrl = getUrlExtension(url);
         const extFromSniff = sniffImageExtension(data);
         const allowOctet = contentType.includes("octet-stream") && (extFromUrl || extFromSniff);
         const isImageData =
           isImageContentType(contentType) || Boolean(extFromSniff) || Boolean(allowOctet);
-        if (!isImageData) return false;
-        const name = buildFilename(url, index, extFromType || extFromUrl || extFromSniff);
+        if (!isImageData) return "failed";
+        const chosenExt = extFromType || extFromUrl || extFromSniff;
+        if (!isExtensionAllowed(filters, chosenExt)) return "filtered";
+        const name = buildFilename(url, index, chosenExt);
         const path = getDownloadPath(name);
         const blobType =
           (isImageContentType(contentType) && contentType) ||
@@ -766,7 +796,7 @@
           "";
         saveBlob(new Blob([data], { type: blobType || "application/octet-stream" }), path);
         downloadedUrls.add(normalized);
-        return true;
+        return "downloaded";
       } catch (error) {
         // ignore fallback failures
       }
@@ -777,26 +807,28 @@
           const text = await response.text();
           const extracted = extractOriginalFromHtml(text);
           if (extracted && extracted !== url) {
-            return downloadOriginal(extracted, index);
+            return downloadOriginal(extracted, index, filters);
           }
           const ogImage = extractImageFromHtml(text, url);
           if (ogImage && ogImage !== url) {
-            return downloadOriginal(ogImage, index);
+            return downloadOriginal(ogImage, index, filters);
           }
-          return false;
+          return "failed";
         }
-        if (!response.ok) return false;
+        if (!response.ok) return "failed";
         const arrayBuffer = await response.arrayBuffer();
         const data = arrayBuffer ? new Uint8Array(arrayBuffer) : null;
-        if (!data || !data.byteLength) return false;
+        if (!data || !data.byteLength) return "failed";
         const extFromType = extensionFromContentType(contentType);
         const extFromUrl = getUrlExtension(url);
         const extFromSniff = sniffImageExtension(data);
         const allowOctet = contentType.includes("octet-stream") && (extFromUrl || extFromSniff);
         const isImageData =
           isImageContentType(contentType) || Boolean(extFromSniff) || Boolean(allowOctet);
-        if (!isImageData) return false;
-        const name = buildFilename(url, index, extFromType || extFromUrl || extFromSniff);
+        if (!isImageData) return "failed";
+        const chosenExt = extFromType || extFromUrl || extFromSniff;
+        if (!isExtensionAllowed(filters, chosenExt)) return "filtered";
+        const name = buildFilename(url, index, chosenExt);
         const path = getDownloadPath(name);
         const blobType =
           (isImageContentType(contentType) && contentType) ||
@@ -804,11 +836,11 @@
           "";
         saveBlob(new Blob([data], { type: blobType || "application/octet-stream" }), path);
         downloadedUrls.add(normalized);
-        return true;
+        return "downloaded";
       } catch (error) {
-        return false;
+        return "failed";
       }
-      return false;
+      return "failed";
     };
 
     const addUrlToState = (url, { respectFilter = false } = {}) => {
@@ -919,8 +951,16 @@
             return true;
           });
       const ordered = [...dedupe(preferred), ...dedupe(secondary)];
-      const allowThumbData = size >= 500 || ordered.length === 0;
-      const filteredThumbs = dedupe(thumbSources).filter((value) => {
+      const allowThumbData = size >= 500;
+      const dedupedThumbs = dedupe(thumbSources);
+      const onlyDataThumbs =
+        ordered.length === 0 &&
+        dedupedThumbs.length > 0 &&
+        dedupedThumbs.every((value) => value.startsWith("data:"));
+      if (onlyDataThumbs && size > 0 && size < 500) {
+        return [];
+      }
+      const filteredThumbs = dedupedThumbs.filter((value) => {
         if (!value.startsWith("data:")) return true;
         return allowThumbData;
       });
@@ -950,24 +990,22 @@
         const filters = getFilters();
         const extForFilter = normalizeExtension(getUrlExtension(resolved));
         if (filters.extensions.length) {
-          if (!extForFilter) {
-            filteredOutCount += 1;
-            updateCounts();
-            return true;
-          }
-          if (!filters.extensions.includes(extForFilter)) {
+          if (extForFilter && !filters.extensions.includes(extForFilter)) {
             filteredOutCount += 1;
             updateCounts();
             return true;
           }
         }
-        const downloaded = await downloadOriginal(resolved, autoDownloadIndex);
+        const result = await downloadOriginal(resolved, autoDownloadIndex, filters);
         autoDownloadIndex += 1;
-        if (downloaded) {
+        if (result === "downloaded") {
           downloadedCount += 1;
           updateCounts();
           return true;
         }
+        filteredOutCount += 1;
+        updateCounts();
+        return true;
       }
       return false;
     };
@@ -1117,6 +1155,10 @@
       let success = 0;
       const usedNames = new Map();
       const buildFilename = (url, index, ext) => {
+        const baseName = sanitizeFilename(baseNameInput.value.trim() || "image");
+        if (baseName) {
+          return `${baseName}-${String(index).padStart(4, "0")}.${ext}`;
+        }
         try {
           const parsed = new URL(url);
           const last = parsed.pathname.split("/").pop() || "";
@@ -1240,6 +1282,12 @@
     };
 
     const runCollect = async ({ silent = false } = {}) => {
+      if (autoOnlyInput.checked) {
+        if (!silent) {
+          setStatus("원본 자동 수집만 사용 중입니다.");
+        }
+        return;
+      }
       state.urls = extractUrls();
       state.filtered = getFilteredTargets(state.urls);
       if (!silent) {
@@ -1267,13 +1315,24 @@
       });
     });
 
-    [pathInput].forEach((input) => {
+    [pathInput, baseNameInput].forEach((input) => {
       input.addEventListener("change", persistSettings);
+    });
+    autoOnlyInput.addEventListener("change", () => {
+      if (autoOnlyInput.checked) {
+        state.urls = [];
+        state.filtered = [];
+        setStatus("원본 자동 수집만 사용 중입니다.");
+      }
+      persistSettings();
     });
     debugInput.addEventListener("change", persistSettings);
     if (toggleBtn && panel) {
       toggleBtn.addEventListener("click", () => {
         panel.classList.toggle("gi-collapsed");
+        const collapsed = panel.classList.contains("gi-collapsed");
+        toggleBtn.textContent = collapsed ? "🗖" : "🗕";
+        toggleBtn.title = collapsed ? "패널 펼치기" : "패널 접기";
       });
     }
 
@@ -1282,6 +1341,7 @@
     let scrollTimer;
     window.addEventListener("scroll", () => {
       if (state.running) return;
+      if (autoOnlyInput.checked) return;
       clearTimeout(scrollTimer);
       scrollTimer = setTimeout(() => runCollect({ silent: true }), 400);
     });

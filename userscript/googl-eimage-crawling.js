@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Google Image Crawling
 // @namespace    https://github.com/shuma0115/googleimage-crawling
-// @version      0.3.3
+// @version      0.3.4
 // @description  Auto collect original Google Images and download to images/ folder.
 // @match        https://www.google.com/*
 // @match        https://www.google.co.kr/*
@@ -267,8 +267,14 @@
       // ignore parse failures
     }
 
-    document.querySelectorAll("img").forEach((img) => {
-      const url = img.getAttribute("src") || img.getAttribute("data-src");
+    const viewerSelectors = [
+      "img.n3VNCb",
+      "img[jsname='HiaYvf']",
+      "img[jsname='kn3ccd']",
+      "img.iPVvYb",
+    ];
+    document.querySelectorAll(viewerSelectors.join(",")).forEach((img) => {
+      const url = img.currentSrc || img.getAttribute("src") || img.getAttribute("data-src");
       addUrl(url);
     });
 
@@ -719,6 +725,12 @@
     const downloadOriginal = async (url, index, filters) => {
       const normalized = normalizeUrl(url);
       if (downloadedUrls.has(normalized)) return "downloaded";
+      if (
+        /^https?:\/\/(encrypted-tbn0\.gstatic\.com|tbn0\.gstatic\.com)\//i.test(url) ||
+        /^https?:\/\/lh3\.googleusercontent\.com\/ogw\//i.test(url)
+      ) {
+        return "filtered";
+      }
       if (url.startsWith("data:")) {
         try {
           const commaIndex = url.indexOf(",");

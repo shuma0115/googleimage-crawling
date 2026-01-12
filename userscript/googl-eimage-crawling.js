@@ -35,6 +35,59 @@
     return match ? match[1].trim() : "";
   };
 
+  const decodeEscapedUrl = (value) =>
+    (value || "")
+      .replace(/\\u002f/g, "/")
+      .replace(/\\u003d/g, "=")
+      .replace(/\\u0026/g, "&");
+
+  const extractOriginalFromHtml = (html) => {
+    if (!html) return "";
+    const match = html.match(/"ou":"(https?:[^"]+)"/);
+    return match ? decodeEscapedUrl(match[1]) : "";
+  };
+
+  const extractImageFromHtml = (html, baseUrl) => {
+    if (!html) return "";
+    try {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const selectors = [
+        "meta[property='og:image']",
+        "meta[property='og:image:secure_url']",
+        "meta[name='twitter:image']",
+        "meta[name='twitter:image:src']",
+        "link[rel='image_src']",
+      ];
+      for (const selector of selectors) {
+        const node = doc.querySelector(selector);
+        if (!node) continue;
+        const value = node.getAttribute("content") || node.getAttribute("href");
+        if (!value) continue;
+        try {
+          return new URL(value, baseUrl).toString();
+        } catch (error) {
+          return value;
+        }
+      }
+    } catch (error) {
+      // ignore parse failures
+    }
+    return "";
+  };
+
+  const extractUrlFromDataIv = (value) => {
+    if (!value) return "";
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object") {
+        return parsed.ou || parsed.iurl || parsed.ru || "";
+      }
+    } catch (error) {
+      // ignore parse failures
+    }
+    return "";
+  };
+
   const loadSettings = () => {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
@@ -79,6 +132,46 @@
     if (ext === "tif") return "tiff";
     if (ext === "svgz") return "svg";
     return ext;
+  };
+
+  const isImageContentType = (value) => /^image\//i.test(value || "");
+
+  const extensionFromContentType = (contentType) => {
+    if (!contentType) return "";
+    const cleaned = contentType.split(";")[0].trim().toLowerCase();
+    if (!cleaned.startsWith("image/")) return "";
+    const subtype = cleaned.split("/").pop() || "";
+    if (subtype.includes("svg")) return "svg";
+    if (subtype.includes("jpeg") || subtype.includes("jpg")) return "jpg";
+    return normalizeExtension(subtype);
+  };
+
+  const sniffImageExtension = (buffer) => {
+    if (!buffer || buffer.length < 12) return "";
+    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "jpg";
+    if (
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47
+    ) {
+      return "png";
+    }
+    if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) return "gif";
+    if (buffer[0] === 0x42 && buffer[1] === 0x4d) return "bmp";
+    if (
+      buffer[0] === 0x52 &&
+      buffer[1] === 0x49 &&
+      buffer[2] === 0x46 &&
+      buffer[3] === 0x46 &&
+      buffer[8] === 0x57 &&
+      buffer[9] === 0x45 &&
+      buffer[10] === 0x42 &&
+      buffer[11] === 0x50
+    ) {
+      return "webp";
+    }
+    return "";
   };
 
   const getUrlExtension = (url) => {
@@ -158,7 +251,7 @@
       const ouRegex = /"ou":"(https?:[^"]+)"/g;
       let match;
       while ((match = ouRegex.exec(html))) {
-        addUrl(match[1].replace(/\\u002f/g, "/").replace(/\\u003d/g, "="));
+        addUrl(decodeEscapedUrl(match[1]));
       }
       const imgurlRegex = /imgurl=([^&"']+)/g;
       while ((match = imgurlRegex.exec(html))) {
@@ -190,6 +283,9 @@
         url,
         responseType: "arraybuffer",
         timeout: 30000,
+        headers: {
+          referer: window.location.href,
+        },
         onload: (resp) =>
           finish(() => {
             if (resp.status >= 200 && resp.status < 300) {
@@ -305,7 +401,10 @@
     const panel = document.createElement("div");
     panel.id = "gi-local-panel";
     panel.innerHTML = `
-      <div class="gi-title">로컬 이미지 저장 도구</div>
+      <div class="gi-header">
+        <div class="gi-title">로컬 이미지 저장 도구</div>
+        <button class="gi-toggle" id="gi-toggle" type="button">_</button>
+      </div>
       <div class="gi-row">
         <label>저장 폴더</label>
         <input id="gi-path" type="text" placeholder="images" />
@@ -326,6 +425,7 @@
       <div class="gi-actions">
         <button id="gi-auto-collect">원본 자동 수집</button>
       </div>
+      <div class="gi-counts" id="gi-counts">수집: 0 / 다운로드: 0 / 필터 제외: 0</div>
       <div class="gi-status" id="gi-status">대기 중</div>
     `;
     document.body.appendChild(panel);
@@ -351,6 +451,26 @@
         font-size: 14px;
         letter-spacing: 0.04em;
         text-transform: uppercase;
+      }
+      #gi-local-panel .gi-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      #gi-local-panel .gi-header .gi-title {
+        margin-bottom: 0;
+      }
+      #gi-local-panel .gi-toggle {
+        border: 1px solid #334155;
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 8px;
+        padding: 2px 8px;
+        font-size: 12px;
+        line-height: 1;
+        cursor: pointer;
       }
       #gi-local-panel .gi-row {
         display: grid;
@@ -395,6 +515,17 @@
         gap: 6px;
         margin: 10px 0;
       }
+      #gi-local-panel .gi-counts {
+        font-size: 12px;
+        color: #94a3b8;
+        margin-bottom: 6px;
+      }
+      #gi-local-panel.gi-collapsed .gi-row,
+      #gi-local-panel.gi-collapsed .gi-actions,
+      #gi-local-panel.gi-collapsed .gi-counts,
+      #gi-local-panel.gi-collapsed .gi-status {
+        display: none;
+      }
       #gi-local-panel button {
         border: none;
         border-radius: 999px;
@@ -421,8 +552,11 @@
     const pathInput = document.getElementById("gi-path");
     const extInputs = Array.from(document.querySelectorAll(".gi-ext"));
     const debugInput = document.getElementById("gi-debug");
+    const countsEl = document.getElementById("gi-counts");
     const statusEl = document.getElementById("gi-status");
     const autoCollectBtn = document.getElementById("gi-auto-collect");
+    const toggleBtn = document.getElementById("gi-toggle");
+    const panel = document.getElementById("gi-local-panel");
 
     const settings = loadSettings();
     pathInput.value = settings.path || "images";
@@ -437,6 +571,14 @@
 
     const setStatus = (text) => {
       statusEl.textContent = text;
+    };
+
+    let collectedCount = 0;
+    let downloadedCount = 0;
+    let filteredOutCount = 0;
+    const updateCounts = () => {
+      if (!countsEl) return;
+      countsEl.textContent = `수집: ${collectedCount} / 다운로드: ${downloadedCount} / 필터 제외: ${filteredOutCount}`;
     };
 
     const setRunning = (running) => {
@@ -490,8 +632,8 @@
       return `${name}${suffix}`;
     };
 
-    const buildFilename = (url, index) => {
-      const ext = getUrlExtension(url) || "jpg";
+    const buildFilename = (url, index, extHint = "") => {
+      const ext = normalizeExtension(extHint) || getUrlExtension(url) || "jpg";
       try {
         const parsed = new URL(url);
         const last = parsed.pathname.split("/").pop() || "";
@@ -530,16 +672,17 @@
 
     const resolveOriginalUrl = async (url) => {
       if (!url || typeof url !== "string") return "";
+      if (url.startsWith("data:") || url.startsWith("blob:")) return url;
       if (isOriginalCandidate(url)) return url;
       try {
         const response = await fetchBinary(url);
         const contentType = response?.contentType || "";
         if (contentType.includes("html")) {
           const text = new TextDecoder("utf-8").decode(response.buffer);
-          const match = text.match(/"ou":"(https?:[^"]+)"/);
-          if (match) {
-            return match[1].replace(/\\u002f/g, "/").replace(/\\u003d/g, "=");
-          }
+          const extracted = extractOriginalFromHtml(text);
+          if (extracted) return extracted;
+          const ogImage = extractImageFromHtml(text, url);
+          if (ogImage) return ogImage;
         }
       } catch (error) {
         // ignore resolve failures
@@ -550,13 +693,11 @@
     const downloadOriginal = async (url, index) => {
       const normalized = normalizeUrl(url);
       if (downloadedUrls.has(normalized)) return false;
-      downloadedUrls.add(normalized);
-      const name = buildFilename(url, index);
-      const path = getDownloadPath(name);
       if (url.startsWith("data:")) {
         try {
           const commaIndex = url.indexOf(",");
           const meta = url.slice(0, commaIndex);
+          if (!/^data:\s*image\//i.test(meta)) return false;
           const base64 = meta.includes(";base64");
           const data = url.slice(commaIndex + 1);
           const bytes = base64 ? atob(data) : decodeURIComponent(data);
@@ -564,7 +705,12 @@
           for (let i = 0; i < bytes.length; i += 1) {
             buffer[i] = bytes.charCodeAt(i);
           }
-          saveBlob(new Blob([buffer]), path);
+          const mimeType = meta.replace(/^data:\s*/i, "");
+          const ext = extensionFromContentType(mimeType);
+          const name = buildFilename(url, index, ext);
+          const path = getDownloadPath(name);
+          saveBlob(new Blob([buffer], { type: mimeType }), path);
+          downloadedUrls.add(normalized);
           return true;
         } catch (error) {
           return false;
@@ -574,39 +720,93 @@
         try {
           const response = await fetch(url);
           const blob = await response.blob();
+          let ext = extensionFromContentType(blob.type || "");
+          if (!ext) {
+            const buffer = new Uint8Array(await blob.arrayBuffer());
+            ext = sniffImageExtension(buffer);
+            if (!ext) return false;
+          }
+          const name = buildFilename(url, index, ext);
+          const path = getDownloadPath(name);
           saveBlob(blob, path);
+          downloadedUrls.add(normalized);
           return true;
         } catch (error) {
           return false;
         }
       }
-      const primary = await new Promise((resolve) => {
-        GM_download({
-          url,
-          name: path,
-          saveAs: false,
-          conflictAction: "uniquify",
-          onload: () => resolve(true),
-          onerror: () => {
-            setStatus("원본 다운로드 실패");
-            resolve(false);
-          },
-          ontimeout: () => {
-            setStatus("원본 다운로드 시간 초과");
-            resolve(false);
-          },
-        });
-      });
-      if (primary) return true;
       try {
-        const { buffer } = await fetchBinary(url);
-        const data = buffer ? new Uint8Array(buffer) : null;
-        if (data && data.byteLength) {
-          saveBlob(new Blob([data]), path);
-          return true;
+        const { buffer, contentType } = await fetchBinary(url);
+        if (contentType.includes("html")) {
+          const text = new TextDecoder("utf-8").decode(buffer);
+          const extracted = extractOriginalFromHtml(text);
+          if (extracted && extracted !== url) {
+            return downloadOriginal(extracted, index);
+          }
+          const ogImage = extractImageFromHtml(text, url);
+          if (ogImage && ogImage !== url) {
+            return downloadOriginal(ogImage, index);
+          }
+          return false;
         }
+        const data = buffer ? new Uint8Array(buffer) : null;
+        if (!data || !data.byteLength) return false;
+        const extFromType = extensionFromContentType(contentType);
+        const extFromUrl = getUrlExtension(url);
+        const extFromSniff = sniffImageExtension(data);
+        const allowOctet = contentType.includes("octet-stream") && (extFromUrl || extFromSniff);
+        const isImageData =
+          isImageContentType(contentType) || Boolean(extFromSniff) || Boolean(allowOctet);
+        if (!isImageData) return false;
+        const name = buildFilename(url, index, extFromType || extFromUrl || extFromSniff);
+        const path = getDownloadPath(name);
+        const blobType =
+          (isImageContentType(contentType) && contentType) ||
+          (extFromSniff ? `image/${extFromSniff}` : "") ||
+          "";
+        saveBlob(new Blob([data], { type: blobType || "application/octet-stream" }), path);
+        downloadedUrls.add(normalized);
+        return true;
       } catch (error) {
         // ignore fallback failures
+      }
+      try {
+        const response = await fetch(url, { credentials: "include", referrer: url });
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("html")) {
+          const text = await response.text();
+          const extracted = extractOriginalFromHtml(text);
+          if (extracted && extracted !== url) {
+            return downloadOriginal(extracted, index);
+          }
+          const ogImage = extractImageFromHtml(text, url);
+          if (ogImage && ogImage !== url) {
+            return downloadOriginal(ogImage, index);
+          }
+          return false;
+        }
+        if (!response.ok) return false;
+        const arrayBuffer = await response.arrayBuffer();
+        const data = arrayBuffer ? new Uint8Array(arrayBuffer) : null;
+        if (!data || !data.byteLength) return false;
+        const extFromType = extensionFromContentType(contentType);
+        const extFromUrl = getUrlExtension(url);
+        const extFromSniff = sniffImageExtension(data);
+        const allowOctet = contentType.includes("octet-stream") && (extFromUrl || extFromSniff);
+        const isImageData =
+          isImageContentType(contentType) || Boolean(extFromSniff) || Boolean(allowOctet);
+        if (!isImageData) return false;
+        const name = buildFilename(url, index, extFromType || extFromUrl || extFromSniff);
+        const path = getDownloadPath(name);
+        const blobType =
+          (isImageContentType(contentType) && contentType) ||
+          (extFromSniff ? `image/${extFromSniff}` : "") ||
+          "";
+        saveBlob(new Blob([data], { type: blobType || "application/octet-stream" }), path);
+        downloadedUrls.add(normalized);
+        return true;
+      } catch (error) {
+        return false;
       }
       return false;
     };
@@ -627,6 +827,7 @@
 
     const isOriginalCandidate = (url) => {
       if (!url || typeof url !== "string") return false;
+      if (url.startsWith("data:") || url.startsWith("blob:")) return true;
       if (!url.startsWith("http")) return false;
       if (/^https?:\/\/(encrypted-tbn0\.gstatic\.com|tbn0\.gstatic\.com)\//i.test(url)) {
         return false;
@@ -662,25 +863,111 @@
     };
 
     let autoDownloadIndex = 1;
-    const collectFromViewer = async (fallbackUrl = "") => {
-      const url = await waitForViewerUrl();
-      if (url) {
-        const added = addUrlToState(url, { respectFilter: true });
-        if (added) {
-          const resolved = await resolveOriginalUrl(url);
-          await downloadOriginal(resolved, autoDownloadIndex);
-          autoDownloadIndex += 1;
+    const getThumbSize = (thumb) => {
+      if (!thumb) return 0;
+      const rect = thumb.getBoundingClientRect();
+      return Math.max(
+        thumb.naturalWidth || 0,
+        thumb.naturalHeight || 0,
+        thumb.width || 0,
+        thumb.height || 0,
+        rect.width || 0,
+        rect.height || 0
+      );
+    };
+    const getThumbCandidates = (thumb, fallbackUrl) => {
+      const size = getThumbSize(thumb);
+      if (size > 0 && size <= 20) return [];
+      const preferred = [];
+      const secondary = [];
+      const thumbSources = [];
+      if (fallbackUrl) preferred.push(fallbackUrl);
+      if (thumb) {
+        const parent = thumb.closest("[data-ou],[data-iurl],[data-iu]");
+        if (parent) {
+          ["data-ou", "data-iurl", "data-iu"].forEach((attr) => {
+            const value = parent.getAttribute(attr);
+            if (value) preferred.push(value);
+          });
         }
-        return !!added;
+        const parentIv = thumb.closest("[data-iv]");
+        if (parentIv) {
+          const dataIv = parentIv.getAttribute("data-iv");
+          const extracted = extractUrlFromDataIv(dataIv);
+          if (extracted) preferred.push(extracted);
+        }
+        const lpage = thumb.closest("[data-lpage]")?.getAttribute("data-lpage");
+        if (lpage) secondary.push(lpage);
+        const anchor = thumb.closest("a[href]");
+        if (anchor && anchor.href) secondary.push(anchor.href);
+        const directAttrs = ["data-iurl", "data-src", "data-lazy-src", "data-iu", "src"];
+        directAttrs.forEach((attr) => {
+          const value = thumb.getAttribute(attr);
+          if (value) thumbSources.push(value);
+        });
+        if (thumb.currentSrc) thumbSources.push(thumb.currentSrc);
+        if (thumb.src) thumbSources.push(thumb.src);
       }
-      if (fallbackUrl) {
-        const added = addUrlToState(fallbackUrl, { respectFilter: true });
-        if (added) {
-          const resolved = await resolveOriginalUrl(fallbackUrl);
-          await downloadOriginal(resolved, autoDownloadIndex);
-          autoDownloadIndex += 1;
+      const seen = new Set();
+      const dedupe = (list) =>
+        list
+          .map((value) => (value || "").trim())
+          .filter(Boolean)
+          .filter((value) => {
+            if (seen.has(value)) return false;
+            seen.add(value);
+            return true;
+          });
+      const ordered = [...dedupe(preferred), ...dedupe(secondary)];
+      const allowThumbData = size >= 500 || ordered.length === 0;
+      const filteredThumbs = dedupe(thumbSources).filter((value) => {
+        if (!value.startsWith("data:")) return true;
+        return allowThumbData;
+      });
+      return [...ordered, ...filteredThumbs];
+    };
+
+    const collectFromViewer = async (thumb, fallbackUrl = "") => {
+      const viewerUrl = await waitForViewerUrl();
+      const candidates = [];
+      if (viewerUrl) candidates.push(viewerUrl);
+      candidates.push(...getThumbCandidates(thumb, fallbackUrl));
+      const seen = new Set();
+      for (const candidate of candidates) {
+        if (!candidate || seen.has(candidate)) continue;
+        seen.add(candidate);
+        const resolved = await resolveOriginalUrl(candidate);
+        const added = addUrlToState(resolved);
+        if (!added) continue;
+        collectedCount += 1;
+        updateCounts();
+        const passes = applyFilters([resolved], getFilters()).length > 0;
+        if (!passes) {
+          filteredOutCount += 1;
+          updateCounts();
+          return true;
         }
-        return !!added;
+        const filters = getFilters();
+        const extForFilter = normalizeExtension(getUrlExtension(resolved));
+        if (filters.extensions.length) {
+          if (!extForFilter) {
+            filteredOutCount += 1;
+            updateCounts();
+            return true;
+          }
+          if (!filters.extensions.includes(extForFilter)) {
+            filteredOutCount += 1;
+            updateCounts();
+            return true;
+          }
+        }
+        const downloaded = await downloadOriginal(resolved, autoDownloadIndex);
+        autoDownloadIndex += 1;
+        if (downloaded) {
+          downloadedCount += 1;
+          updateCounts();
+          return true;
+        }
       }
       return false;
     };
@@ -722,6 +1009,11 @@
       if (state.autoCollecting) return;
       state.autoCollecting = true;
       autoCollectBtn.textContent = "자동 수집 중지";
+      setStatus("수집 중");
+      collectedCount = 0;
+      downloadedCount = 0;
+      filteredOutCount = 0;
+      updateCounts();
 
       let thumbs = getThumbnailElements();
       if (!thumbs.length) {
@@ -732,7 +1024,6 @@
       }
 
       const processedThumbs = new Set();
-      setStatus(`원본 자동 수집 시작 (0/${thumbs.length})`);
       for (let i = 0; i < thumbs.length; i += 1) {
         if (!state.autoCollecting) break;
         const thumb = thumbs[i];
@@ -780,11 +1071,10 @@
           });
           if (!state.autoCollecting) break;
           await new Promise((resolve) => setTimeout(resolve, 350));
-          const collected = await collectFromViewer(fallback);
+          const collected = await collectFromViewer(thumb, fallback);
           if (!collected && debugInput.checked) {
             console.warn("[GI-IMG] No viewer URL found for thumb", thumb);
           }
-          setStatus(`원본 자동 수집 중 (${i + 1}/${thumbs.length})`);
         } catch (error) {
           if (debugInput.checked) {
             console.warn("[GI-IMG] Auto collect error", error);
@@ -803,12 +1093,13 @@
 
       state.autoCollecting = false;
       autoCollectBtn.textContent = "원본 자동 수집";
+      setStatus("대기 중");
     };
 
     const stopAutoCollect = () => {
       state.autoCollecting = false;
       autoCollectBtn.textContent = "원본 자동 수집";
-      setStatus("원본 자동 수집 중지");
+      setStatus("대기 중");
     };
 
     const runDownload = async (targets) => {
@@ -864,6 +1155,10 @@
             if (url.startsWith("data:")) {
               const commaIndex = url.indexOf(",");
               const meta = url.slice(0, commaIndex);
+              if (!/^data:\s*image\//i.test(meta)) {
+                setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
+                continue;
+              }
               const base64 = meta.includes(";base64");
               const data = url.slice(commaIndex + 1);
               const bytes = base64 ? atob(data) : decodeURIComponent(data);
@@ -871,10 +1166,11 @@
               for (let j = 0; j < bytes.length; j += 1) {
                 buffer[j] = bytes.charCodeAt(j);
               }
-              const mimeMatch = meta.match(/^data:([^;,]+)/i);
-              const ext = guessExtension(url, mimeMatch ? mimeMatch[1] : "");
+              const mimeMatch = meta.match(/^data:\s*([^;,]+)/i);
+              const mimeType = mimeMatch ? mimeMatch[1] : "";
+              const ext = extensionFromContentType(mimeType);
               const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
-              saveBlob(new Blob([buffer]), getDownloadPath(filename));
+              saveBlob(new Blob([buffer], { type: mimeType }), getDownloadPath(filename));
               success += 1;
               setStatus(`다운로드 중 (${success}/${sliced.length})`);
               continue;
@@ -882,7 +1178,15 @@
             if (url.startsWith("blob:")) {
               const response = await fetch(url);
               const blob = await response.blob();
-              const ext = guessExtension(url, blob.type || "");
+              let ext = extensionFromContentType(blob.type || "");
+              if (!ext) {
+                const buffer = new Uint8Array(await blob.arrayBuffer());
+                ext = sniffImageExtension(buffer);
+                if (!ext) {
+                  setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
+                  continue;
+                }
+              }
               const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
               saveBlob(blob, getDownloadPath(filename));
               success += 1;
@@ -890,14 +1194,32 @@
               continue;
             }
             const { buffer, contentType } = await fetchBinary(url);
-            const ext = guessExtension(url, contentType);
+            if (contentType.includes("html")) {
+              setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
+              continue;
+            }
             const data = buffer ? new Uint8Array(buffer) : null;
             if (!data || !data.byteLength) {
               setStatus(`빈 파일 건너뜀: ${i + 1}/${sliced.length}`);
               continue;
             }
+            const extFromType = extensionFromContentType(contentType);
+            const extFromUrl = getUrlExtension(url);
+            const extFromSniff = sniffImageExtension(data);
+            const allowOctet = contentType.includes("octet-stream") && (extFromUrl || extFromSniff);
+            const isImageData =
+              isImageContentType(contentType) || Boolean(extFromSniff) || Boolean(allowOctet);
+            if (!isImageData) {
+              setStatus(`다운로드 건너뜀: ${i + 1}/${sliced.length}`);
+              continue;
+            }
+            const ext = extFromType || extFromUrl || extFromSniff || "jpg";
             const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
-            const blob = new Blob([data]);
+            const blobType =
+              (isImageContentType(contentType) && contentType) ||
+              (extFromSniff ? `image/${extFromSniff}` : "") ||
+              "";
+            const blob = new Blob([data], { type: blobType || "application/octet-stream" });
             saveBlob(blob, getDownloadPath(filename));
             success += 1;
             setStatus(`다운로드 중 (${success}/${sliced.length})`);
@@ -949,8 +1271,14 @@
       input.addEventListener("change", persistSettings);
     });
     debugInput.addEventListener("change", persistSettings);
+    if (toggleBtn && panel) {
+      toggleBtn.addEventListener("click", () => {
+        panel.classList.toggle("gi-collapsed");
+      });
+    }
 
     runCollect({ silent: true });
+    updateCounts();
     let scrollTimer;
     window.addEventListener("scroll", () => {
       if (state.running) return;
@@ -961,10 +1289,10 @@
 
   const init = () => {
     if (document.getElementById("gi-local-panel")) return;
-    const params = new URLSearchParams(window.location.search);
-    const isImagesHost = window.location.hostname === "images.google.com";
-    const isImages = isImagesHost || params.get("tbm") === "isch" || params.get("udm") === "2";
-    if (!isImages) return;
+    if (!document.body || !document.head) {
+      setTimeout(init, 300);
+      return;
+    }
 
     createPanel();
     setupHandlers();

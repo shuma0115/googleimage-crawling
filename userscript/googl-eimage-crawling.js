@@ -10,8 +10,6 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
 // @connect      *
-// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
-// @require      https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js
 // ==/UserScript==
 
 (() => {
@@ -25,23 +23,11 @@
   };
   const STORAGE_KEY = "gi-local-settings";
 
-  const sanitizeName = (value) =>
-    (value || "images")
-      .trim()
-      .replace(/\s+/g, "-")
-      .replace(/[^a-zA-Z0-9\-_.]/g, "")
-      .toLowerCase() || "images";
-
   const sanitizeFilename = (value) =>
     (value || "")
       .trim()
       .replace(/\s+/g, "-")
-      .replace(/[^a-zA-Z0-9\-_.]/g, "");
-
-  const parseQuery = () => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("q") || "google-images";
-  };
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "");
 
   const parseContentType = (headers) => {
     if (!headers) return "";
@@ -71,6 +57,7 @@
       if (contentType.includes("gif")) return "gif";
       if (contentType.includes("webp")) return "webp";
       if (contentType.includes("bmp")) return "bmp";
+      if (contentType.includes("svg")) return "svg";
       if (contentType.includes("jpeg") || contentType.includes("jpg")) return "jpg";
     }
     try {
@@ -85,19 +72,34 @@
     return "jpg";
   };
 
+  const normalizeExtension = (value) => {
+    const ext = (value || "").toLowerCase();
+    if (!ext) return "";
+    if (ext === "jpeg" || ext === "jpe" || ext === "jfif") return "jpg";
+    if (ext === "tif") return "tiff";
+    if (ext === "svgz") return "svg";
+    return ext;
+  };
+
   const getUrlExtension = (url) => {
     try {
+      if (url.startsWith("data:")) {
+        const match = url.match(/^data:([^;,]+)/i);
+        if (match) {
+          return normalizeExtension(match[1].split("/").pop());
+        }
+      }
       const parsed = new URL(url);
       const path = parsed.pathname;
       const last = path.split("/").pop();
       if (last && last.includes(".")) {
-        return last.split(".").pop().toLowerCase();
+        return normalizeExtension(last.split(".").pop());
       }
       const queryExt =
         parsed.searchParams.get("fm") ||
         parsed.searchParams.get("fmt") ||
         parsed.searchParams.get("ext");
-      if (queryExt) return queryExt.toLowerCase();
+      if (queryExt) return normalizeExtension(queryExt);
     } catch (error) {
       return "";
     }
@@ -108,7 +110,7 @@
     const { extensions } = filters;
     return urls.filter((url) => {
       if (extensions.length) {
-        const ext = getUrlExtension(url);
+        const ext = normalizeExtension(getUrlExtension(url));
         if (ext && !extensions.includes(ext)) return false;
       }
 
@@ -215,6 +217,72 @@
     });
 
   const saveBlob = (blob, filename) => {
+    if (typeof GM_download === "function") {
+      const url = URL.createObjectURL(blob);
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+      const fallbackToSaveAs = () => {
+        if (typeof saveAs === "function") {
+          saveAs(blob, filename);
+          return;
+        }
+        if (typeof window.saveAs === "function") {
+          window.saveAs(blob, filename);
+          return;
+        }
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      };
+      const fallbackToDataUrl = () => {
+        try {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result;
+            if (typeof dataUrl !== "string") {
+              fallbackToSaveAs();
+              return;
+            }
+            GM_download({
+              url: dataUrl,
+              name: filename,
+              saveAs: false,
+              conflictAction: "uniquify",
+              onload: () => {
+                cleanup();
+              },
+              onerror: () => {
+                cleanup();
+                fallbackToSaveAs();
+              },
+            });
+          };
+          reader.onerror = () => fallbackToSaveAs();
+          reader.readAsDataURL(blob);
+        } catch (error) {
+          fallbackToSaveAs();
+        }
+      };
+      GM_download({
+        url,
+        name: filename,
+        saveAs: false,
+        conflictAction: "uniquify",
+        onload: cleanup,
+        onerror: () => {
+          cleanup();
+          fallbackToDataUrl();
+        },
+      });
+      return;
+    }
     if (typeof saveAs === "function") {
       saveAs(blob, filename);
       return;
@@ -237,14 +305,10 @@
     const panel = document.createElement("div");
     panel.id = "gi-local-panel";
     panel.innerHTML = `
-      <div class="gi-title">로컬 이미지 ZIP 도구</div>
+      <div class="gi-title">로컬 이미지 저장 도구</div>
       <div class="gi-row">
-        <label>폴더명</label>
-        <input id="gi-folder" type="text" />
-      </div>
-      <div class="gi-row">
-        <label>최대 개수</label>
-        <input id="gi-limit" type="number" min="1" max="200" value="30" />
+        <label>저장 폴더</label>
+        <input id="gi-path" type="text" placeholder="images" />
       </div>
       <div class="gi-row">
         <label>확장자 필터</label>
@@ -253,6 +317,7 @@
           <label><input class="gi-ext" type="checkbox" value="png" checked /> PNG</label>
           <label><input class="gi-ext" type="checkbox" value="gif" checked /> GIF</label>
           <label><input class="gi-ext" type="checkbox" value="webp" checked /> WEBP</label>
+          <label><input class="gi-ext" type="checkbox" value="svg" /> SVG</label>
         </div>
       </div>
       <div class="gi-row gi-inline">
@@ -262,7 +327,6 @@
         <button id="gi-auto-collect">원본 자동 수집</button>
       </div>
       <div class="gi-status" id="gi-status">대기 중</div>
-      <div class="gi-count">수집된 URL: <span id="gi-count">0</span>개 · 필터 후 <span id="gi-count-filtered">0</span>개</div>
     `;
     document.body.appendChild(panel);
 
@@ -345,8 +409,7 @@
         opacity: 0.6;
         cursor: not-allowed;
       }
-      #gi-local-panel .gi-status,
-      #gi-local-panel .gi-count {
+      #gi-local-panel .gi-status {
         font-size: 12px;
         color: #cbd5f5;
       }
@@ -355,18 +418,14 @@
   };
 
   const setupHandlers = () => {
-    const folderInput = document.getElementById("gi-folder");
-    const limitInput = document.getElementById("gi-limit");
+    const pathInput = document.getElementById("gi-path");
     const extInputs = Array.from(document.querySelectorAll(".gi-ext"));
     const debugInput = document.getElementById("gi-debug");
     const statusEl = document.getElementById("gi-status");
-    const countEl = document.getElementById("gi-count");
-    const filteredCountEl = document.getElementById("gi-count-filtered");
     const autoCollectBtn = document.getElementById("gi-auto-collect");
 
     const settings = loadSettings();
-    folderInput.value = settings.folder || parseQuery();
-    limitInput.value = settings.limit || limitInput.value;
+    pathInput.value = settings.path || "images";
     if (Array.isArray(settings.extensions) && settings.extensions.length) {
       extInputs.forEach((input) => {
         input.checked = settings.extensions.includes(input.value);
@@ -386,14 +445,16 @@
     };
 
     const getFilters = () => ({
-      extensions: extInputs.filter((input) => input.checked).map((input) => input.value),
+      extensions: extInputs
+        .filter((input) => input.checked)
+        .map((input) => normalizeExtension(input.value)),
     });
 
     const persistSettings = () => {
       const filters = getFilters();
+      const currentPath = pathInput.value.trim() || "images";
       saveSettings({
-        folder: folderInput.value.trim(),
-        limit: Number(limitInput.value || 30),
+        path: currentPath,
         extensions: filters.extensions,
         debug: debugInput.checked,
       });
@@ -401,15 +462,13 @@
 
     const getFilteredTargets = (urls = state.urls) => applyFilters(urls, getFilters());
 
-    const updateCounts = (allCount, filteredCount) => {
-      countEl.textContent = String(allCount);
-      filteredCountEl.textContent = String(filteredCount);
-    };
-
     const downloadedUrls = new Set();
     const normalizeUrl = (value) => {
       try {
         const parsed = new URL(value);
+        ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "ved", "sqi"].forEach(
+          (key) => parsed.searchParams.delete(key)
+        );
         parsed.hash = "";
         return parsed.toString();
       } catch (error) {
@@ -451,36 +510,119 @@
       return ensureUniqueName(`${String(index).padStart(3, "0")}.${ext}`);
     };
 
-    const downloadOriginal = (url, index) => {
+    const sanitizePath = (value) =>
+      (value || "")
+        .split("/")
+        .map((part) =>
+          part
+            .trim()
+            .replace(/\s+/g, "-")
+            .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "")
+        )
+        .filter(Boolean)
+        .join("/");
+
+    const getDownloadPath = (name) => {
+      const raw = pathInput.value.trim();
+      const base = sanitizePath(raw) || "images";
+      return `${base}/${name}`;
+    };
+
+    const resolveOriginalUrl = async (url) => {
+      if (!url || typeof url !== "string") return "";
+      if (isOriginalCandidate(url)) return url;
+      try {
+        const response = await fetchBinary(url);
+        const contentType = response?.contentType || "";
+        if (contentType.includes("html")) {
+          const text = new TextDecoder("utf-8").decode(response.buffer);
+          const match = text.match(/"ou":"(https?:[^"]+)"/);
+          if (match) {
+            return match[1].replace(/\\u002f/g, "/").replace(/\\u003d/g, "=");
+          }
+        }
+      } catch (error) {
+        // ignore resolve failures
+      }
+      return url;
+    };
+
+    const downloadOriginal = async (url, index) => {
       const normalized = normalizeUrl(url);
-      if (downloadedUrls.has(normalized)) return Promise.resolve(false);
+      if (downloadedUrls.has(normalized)) return false;
       downloadedUrls.add(normalized);
       const name = buildFilename(url, index);
-      const path = `images/${name}`;
-      return new Promise((resolve) => {
+      const path = getDownloadPath(name);
+      if (url.startsWith("data:")) {
+        try {
+          const commaIndex = url.indexOf(",");
+          const meta = url.slice(0, commaIndex);
+          const base64 = meta.includes(";base64");
+          const data = url.slice(commaIndex + 1);
+          const bytes = base64 ? atob(data) : decodeURIComponent(data);
+          const buffer = new Uint8Array(bytes.length);
+          for (let i = 0; i < bytes.length; i += 1) {
+            buffer[i] = bytes.charCodeAt(i);
+          }
+          saveBlob(new Blob([buffer]), path);
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+      if (url.startsWith("blob:")) {
+        try {
+          const response = await fetch(url);
+          const blob = await response.blob();
+          saveBlob(blob, path);
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+      const primary = await new Promise((resolve) => {
         GM_download({
           url,
           name: path,
+          saveAs: false,
+          conflictAction: "uniquify",
           onload: () => resolve(true),
           onerror: () => {
             setStatus("원본 다운로드 실패");
             resolve(false);
           },
+          ontimeout: () => {
+            setStatus("원본 다운로드 시간 초과");
+            resolve(false);
+          },
         });
       });
+      if (primary) return true;
+      try {
+        const { buffer } = await fetchBinary(url);
+        const data = buffer ? new Uint8Array(buffer) : null;
+        if (data && data.byteLength) {
+          saveBlob(new Blob([data]), path);
+          return true;
+        }
+      } catch (error) {
+        // ignore fallback failures
+      }
+      return false;
     };
 
     const addUrlToState = (url, { respectFilter = false } = {}) => {
-      if (!url) return;
-      if (respectFilter) {
-        const passes = applyFilters([url], getFilters()).length > 0;
-        if (!passes) return;
-      }
+      if (!url) return false;
+      const passes = applyFilters([url], getFilters()).length > 0;
       const next = new Set(state.urls);
+      const alreadyHad = next.has(url);
       next.add(url);
       state.urls = Array.from(next);
       state.filtered = getFilteredTargets(state.urls);
-      updateCounts(state.urls.length, state.filtered.length);
+      if (respectFilter) {
+        return !alreadyHad && passes;
+      }
+      return !alreadyHad;
     };
 
     const isOriginalCandidate = (url) => {
@@ -509,7 +651,7 @@
       return candidates[0] || "";
     };
 
-    const waitForViewerUrl = async (timeoutMs = 3000) => {
+    const waitForViewerUrl = async (timeoutMs = 5000) => {
       const started = Date.now();
       while (Date.now() - started < timeoutMs) {
         const url = findViewerUrl();
@@ -523,16 +665,22 @@
     const collectFromViewer = async (fallbackUrl = "") => {
       const url = await waitForViewerUrl();
       if (url) {
-        addUrlToState(url, { respectFilter: true });
-        await downloadOriginal(url, autoDownloadIndex);
-        autoDownloadIndex += 1;
-        return true;
+        const added = addUrlToState(url, { respectFilter: true });
+        if (added) {
+          const resolved = await resolveOriginalUrl(url);
+          await downloadOriginal(resolved, autoDownloadIndex);
+          autoDownloadIndex += 1;
+        }
+        return !!added;
       }
       if (fallbackUrl) {
-        addUrlToState(fallbackUrl, { respectFilter: true });
-        await downloadOriginal(fallbackUrl, autoDownloadIndex);
-        autoDownloadIndex += 1;
-        return true;
+        const added = addUrlToState(fallbackUrl, { respectFilter: true });
+        if (added) {
+          const resolved = await resolveOriginalUrl(fallbackUrl);
+          await downloadOriginal(resolved, autoDownloadIndex);
+          autoDownloadIndex += 1;
+        }
+        return !!added;
       }
       return false;
     };
@@ -583,10 +731,18 @@
         return;
       }
 
+      const processedThumbs = new Set();
       setStatus(`원본 자동 수집 시작 (0/${thumbs.length})`);
       for (let i = 0; i < thumbs.length; i += 1) {
         if (!state.autoCollecting) break;
         const thumb = thumbs[i];
+        const thumbKey =
+          thumb.closest("[data-tbnid]")?.getAttribute("data-tbnid") ||
+          normalizeUrl(thumb.currentSrc || thumb.src || "");
+        if (thumbKey && processedThumbs.has(thumbKey)) {
+          continue;
+        }
+        if (thumbKey) processedThumbs.add(thumbKey);
         const anchor = thumb.closest("a[href*='imgurl=']");
         let fallback = "";
         if (anchor) {
@@ -599,21 +755,41 @@
           }
         }
 
-        thumb.scrollIntoView({ block: "center", behavior: "instant" });
-        const navAnchor = thumb.closest("a[href]");
-        if (navAnchor) {
-          const preventNav = (event) => {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-          };
-          navAnchor.addEventListener("click", preventNav, { capture: true, once: true });
+        try {
+          const clickTarget =
+            thumb.closest("a[href], [role='link'], div[data-tbnid], div[data-iv]") || thumb;
+          clickTarget.scrollIntoView({ block: "center", behavior: "instant" });
+          const navAnchor = clickTarget.closest("a[href]");
+          if (navAnchor) {
+            const preventNav = (event) => {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            };
+            navAnchor.addEventListener("click", preventNav, { capture: true, once: true });
+          }
+          ["mousedown", "mouseup", "click"].forEach((type) => {
+            try {
+              clickTarget.dispatchEvent(
+                new MouseEvent(type, { bubbles: true, cancelable: true })
+              );
+            } catch (error) {
+              if (type === "click" && typeof clickTarget.click === "function") {
+                clickTarget.click();
+              }
+            }
+          });
+          if (!state.autoCollecting) break;
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          const collected = await collectFromViewer(fallback);
+          if (!collected && debugInput.checked) {
+            console.warn("[GI-IMG] No viewer URL found for thumb", thumb);
+          }
+          setStatus(`원본 자동 수집 중 (${i + 1}/${thumbs.length})`);
+        } catch (error) {
+          if (debugInput.checked) {
+            console.warn("[GI-IMG] Auto collect error", error);
+          }
         }
-        thumb.dispatchEvent(
-          new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
-        );
-        if (!state.autoCollecting) break;
-        await collectFromViewer(fallback);
-        setStatus(`원본 자동 수집 중 (${i + 1}/${thumbs.length})`);
 
         if (i % 15 === 0) {
           window.scrollBy(0, window.innerHeight);
@@ -642,24 +818,12 @@
         return;
       }
 
-      const limit = Math.min(Number(limitInput.value || 30), 200);
-      const folder = sanitizeName(folderInput.value);
-      const sliced = targets.slice(0, limit);
+      const sliced = targets.slice(0);
 
       setRunning(true);
       setStatus(`다운로드 시작 (0/${sliced.length})`);
 
-      if (typeof JSZip === "undefined") {
-        setStatus("ZIP 라이브러리를 불러오지 못했습니다.");
-        setRunning(false);
-        return;
-      }
-      if (JSZip.defaults && "useWebWorkers" in JSZip.defaults) {
-        JSZip.defaults.useWebWorkers = false;
-      }
-
       let success = 0;
-      const downloaded = [];
       const usedNames = new Map();
       const buildFilename = (url, index, ext) => {
         try {
@@ -693,151 +857,61 @@
         return `${name}${suffix}`;
       };
 
-      for (let i = 0; i < sliced.length; i += 1) {
-        const url = sliced[i];
-        try {
-          const { buffer, contentType } = await fetchBinary(url);
-          const ext = guessExtension(url, contentType);
-          const data = buffer ? new Uint8Array(buffer) : null;
-          if (!data || !data.byteLength) {
-            setStatus(`빈 파일 건너뜀: ${i + 1}/${sliced.length}`);
-            continue;
-          }
-          const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
-          downloaded.push({
-            data,
-            ext,
-            index: i + 1,
-            name: filename,
-            size: data.byteLength,
-            url,
-          });
-          success += 1;
-          setStatus(`다운로드 중 (${success}/${sliced.length})`);
-        } catch (error) {
-          setStatus(`다운로드 실패: ${i + 1}/${sliced.length}`);
-        }
-      }
-
-      if (!success) {
-        setStatus("다운로드할 이미지가 없습니다.");
-        setRunning(false);
-        return;
-      }
-
-      const generateZipWithTimeout = (zipInstance, options, timeoutMs, label) =>
-        new Promise((resolve, reject) => {
-          const zipPromise = zipInstance.generateAsync(options, (metadata) => {
-            const percent = Math.floor(metadata.percent || 0);
-            setStatus(`${label} ${percent}%`);
-          });
-          const timer = setTimeout(() => reject(new Error("zip-timeout")), timeoutMs);
-          zipPromise
-            .then((blob) => {
-              clearTimeout(timer);
-              resolve(blob);
-            })
-            .catch((error) => {
-              clearTimeout(timer);
-              reject(error);
-            });
-        });
-
-      const downloadIndividually = async (items = downloaded) => {
-        if (!items.length) return;
-        setStatus("개별 다운로드 중...");
-        for (let i = 0; i < items.length; i += 1) {
-          const item = items[i];
-          const blob = new Blob([item.data]);
-          saveBlob(blob, item.name || `${folder}-${String(item.index).padStart(3, "0")}.${item.ext}`);
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-        setStatus(`개별 다운로드 완료: ${items.length}개`);
-      };
-
-      const handleZipFailure = async (items) => {
-        setStatus("ZIP 생성이 지연되어 개별 다운로드로 전환합니다.");
-        if (debugInput.checked && Array.isArray(items)) {
-          console.warn("[GI-ZIP] ZIP failed batch URLs:", items.map((item) => item.url));
-        }
-        await downloadIndividually(items);
-      };
-
       try {
-        const MAX_FILES_PER_ZIP = 50;
-        const MAX_ZIP_BYTES = 80 * 1024 * 1024;
-        const batches = [];
-        let current = [];
-        let currentBytes = 0;
-
-        downloaded.forEach((item) => {
-          const wouldExceed =
-            current.length >= MAX_FILES_PER_ZIP ||
-            (current.length && currentBytes + item.size > MAX_ZIP_BYTES);
-          if (wouldExceed) {
-            batches.push(current);
-            current = [];
-            currentBytes = 0;
+        for (let i = 0; i < sliced.length; i += 1) {
+          const url = sliced[i];
+          try {
+            if (url.startsWith("data:")) {
+              const commaIndex = url.indexOf(",");
+              const meta = url.slice(0, commaIndex);
+              const base64 = meta.includes(";base64");
+              const data = url.slice(commaIndex + 1);
+              const bytes = base64 ? atob(data) : decodeURIComponent(data);
+              const buffer = new Uint8Array(bytes.length);
+              for (let j = 0; j < bytes.length; j += 1) {
+                buffer[j] = bytes.charCodeAt(j);
+              }
+              const mimeMatch = meta.match(/^data:([^;,]+)/i);
+              const ext = guessExtension(url, mimeMatch ? mimeMatch[1] : "");
+              const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
+              saveBlob(new Blob([buffer]), getDownloadPath(filename));
+              success += 1;
+              setStatus(`다운로드 중 (${success}/${sliced.length})`);
+              continue;
+            }
+            if (url.startsWith("blob:")) {
+              const response = await fetch(url);
+              const blob = await response.blob();
+              const ext = guessExtension(url, blob.type || "");
+              const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
+              saveBlob(blob, getDownloadPath(filename));
+              success += 1;
+              setStatus(`다운로드 중 (${success}/${sliced.length})`);
+              continue;
+            }
+            const { buffer, contentType } = await fetchBinary(url);
+            const ext = guessExtension(url, contentType);
+            const data = buffer ? new Uint8Array(buffer) : null;
+            if (!data || !data.byteLength) {
+              setStatus(`빈 파일 건너뜀: ${i + 1}/${sliced.length}`);
+              continue;
+            }
+            const filename = ensureUniqueName(buildFilename(url, i + 1, ext));
+            const blob = new Blob([data]);
+            saveBlob(blob, getDownloadPath(filename));
+            success += 1;
+            setStatus(`다운로드 중 (${success}/${sliced.length})`);
+          } catch (error) {
+            setStatus(`다운로드 실패: ${i + 1}/${sliced.length}`);
           }
-          current.push(item);
-          currentBytes += item.size;
-        });
-        if (current.length) {
-          batches.push(current);
         }
 
-        for (let b = 0; b < batches.length; b += 1) {
-          const batch = batches[b];
-          const zip = new JSZip();
-          const folderHandle = zip.folder(folder);
-          batch.forEach((item) => {
-            folderHandle.file(item.name, item.data);
-          });
-
-          const label =
-            batches.length > 1 ? `ZIP 생성 중 (${b + 1}/${batches.length})...` : "ZIP 생성 중...";
-          let blob;
-          try {
-            blob = await generateZipWithTimeout(
-              zip,
-              { type: "blob", streamFiles: true, compression: "STORE" },
-              180000,
-              label
-            );
-          } catch (error) {
-            if (error && error.message === "zip-timeout") {
-              try {
-                setStatus("ZIP 대체 생성 중...");
-                const data = await generateZipWithTimeout(
-                  zip,
-                  { type: "uint8array", streamFiles: false, compression: "STORE" },
-                  180000,
-                  "ZIP 대체 생성 중..."
-                );
-                blob = new Blob([data], { type: "application/zip" });
-              } catch (retryError) {
-                if (retryError && retryError.message === "zip-timeout") {
-                  await handleZipFailure(batch);
-                  continue;
-                }
-                throw retryError;
-              }
-            } else {
-              throw error;
-            }
-          }
-
-          const suffix = batches.length > 1 ? `-${b + 1}` : "";
-          saveBlob(blob, `${folder}${suffix}.zip`);
+        if (!success) {
+          setStatus("다운로드할 이미지가 없습니다.");
+          return;
         }
 
         setStatus(`완료: ${success}/${sliced.length}개 저장`);
-      } catch (error) {
-        if (error && error.message === "zip-timeout") {
-          await handleZipFailure(downloaded);
-        } else {
-          setStatus("ZIP 생성 실패");
-        }
       } finally {
         setRunning(false);
       }
@@ -846,7 +920,6 @@
     const runCollect = async ({ silent = false } = {}) => {
       state.urls = extractUrls();
       state.filtered = getFilteredTargets(state.urls);
-      updateCounts(state.urls.length, state.filtered.length);
       if (!silent) {
         setStatus(`URL 수집 완료 (${state.filtered.length}개)`);
       }
@@ -863,7 +936,6 @@
     const refreshFiltered = () => {
       if (!state.urls.length) return;
       state.filtered = getFilteredTargets(state.urls);
-      updateCounts(state.urls.length, state.filtered.length);
     };
 
     extInputs.forEach((input) => {
@@ -873,7 +945,7 @@
       });
     });
 
-    [folderInput, limitInput].forEach((input) => {
+    [pathInput].forEach((input) => {
       input.addEventListener("change", persistSettings);
     });
     debugInput.addEventListener("change", persistSettings);

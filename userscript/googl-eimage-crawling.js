@@ -1253,7 +1253,7 @@
             }
           });
           if (!state.autoCollecting) break;
-          if (!(await sleep(document.hidden ? 1200 : 350))) break;
+          if (!(await sleep(document.hidden ? 650 : 350))) break;
           const collected = await collectFromViewer(thumb, fallback);
           if (!collected && debugInput.checked) {
             console.warn("[GI-IMG] No viewer URL found for thumb", thumb);
@@ -1266,7 +1266,7 @@
 
         if (i % 15 === 0) {
           window.scrollBy(0, window.innerHeight);
-          if (!(await sleep(document.hidden ? 1200 : 400))) break;
+          if (!(await sleep(document.hidden ? 650 : 400))) break;
           thumbs = getThumbnailElements();
         } else {
           if (
@@ -1275,17 +1275,18 @@
             downloadedCount > 0 &&
             downloadedCount >= nextBatchTarget
           ) {
-          setStatus(`${nextBatchTarget}개 수집 후 ${batchDelaySec}초 대기...`);
-          await sleep(batchDelaySec * 1000);
-          setStatus("수집 중");
-          updateNextBatchTarget();
+            setStatus(`${nextBatchTarget}개 수집 후 ${batchDelaySec}초 대기...`);
+            await sleep(batchDelaySec * 1000);
+            setStatus("수집 중");
+            updateNextBatchTarget();
           }
+          const hiddenSlowdown = document.hidden ? 1.4 : 1;
           const baseDelay = randomDelayEnabled
-            ? getRandom(delayMin, delayMax)
+            ? Math.round(getRandom(delayMin, delayMax) * hiddenSlowdown)
             : document.hidden
-            ? 2000
+            ? 900
             : 500;
-          const jitter = randomDelayEnabled ? 0 : document.hidden ? 500 : 200;
+          const jitter = randomDelayEnabled ? 0 : document.hidden ? 300 : 200;
           const delay = baseDelay + jitter;
           if (!(await sleep(delay))) break;
         }

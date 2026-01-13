@@ -1041,8 +1041,10 @@
       /^https?:\/\/(encrypted-tbn0\.gstatic\.com|tbn0\.gstatic\.com)\//i.test(value || "") ||
       /^https?:\/\/lh3\.googleusercontent\.com\/ogw\//i.test(value || "");
 
+    const isPageVisible = () => !document.hidden;
+
     const collectFromViewer = async (thumb, fallbackUrl = "") => {
-      const viewerUrl = await waitForViewerUrl();
+      const viewerUrl = isPageVisible() ? await waitForViewerUrl() : "";
       logDebug("viewer url", viewerUrl || "(none)");
       const candidates = viewerUrl ? [viewerUrl] : getThumbCandidates(thumb, fallbackUrl);
       logDebug("candidates", candidates);

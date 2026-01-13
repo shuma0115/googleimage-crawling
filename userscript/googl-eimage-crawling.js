@@ -1158,6 +1158,12 @@
       updateNextBatchTarget();
 
       const sleep = async (ms) => {
+        if (!state.autoCollecting) return false;
+        if (document.hidden) {
+          // When the tab is hidden/minimized, timers may be throttled; resolve immediately.
+          await Promise.resolve();
+          return state.autoCollecting;
+        }
         const step = 200;
         let remaining = ms;
         while (state.autoCollecting && remaining > 0) {

@@ -1157,12 +1157,14 @@
       updateCounts();
       updateNextBatchTarget();
 
-      const sleep = async (ms) => {
+      const sleep = async (ms, { allowHidden = false } = {}) => {
         if (!state.autoCollecting) return false;
         if (document.hidden) {
-          // When the tab is hidden/minimized, timers may be throttled; resolve immediately.
-          await Promise.resolve();
-          return state.autoCollecting;
+          if (!allowHidden) {
+            // Timers are throttled when hidden; skip waiting unless caller needs the delay.
+            await Promise.resolve();
+            return state.autoCollecting;
+          }
         }
         const step = 200;
         let remaining = ms;
@@ -1279,8 +1281,8 @@
             downloadedCount > 0 &&
             downloadedCount >= nextBatchTarget
           ) {
-            setStatus(`${nextBatchTarget}개 수집 후 ${batchDelaySec}초 대기...`);
-            await sleep(batchDelaySec * 1000);
+          setStatus(`${nextBatchTarget}개 수집 후 ${batchDelaySec}초 대기...`);
+          await sleep(batchDelaySec * 1000, { allowHidden: randomDelayEnabled });
             setStatus("수집 중");
             updateNextBatchTarget();
           }
@@ -1291,7 +1293,7 @@
             : 500;
           const jitter = randomDelayEnabled ? 0 : document.hidden ? 500 : 200;
           const delay = baseDelay + jitter;
-          if (!(await sleep(delay))) break;
+          if (!(await sleep(delay, { allowHidden: randomDelayEnabled }))) break;
         }
       }
 

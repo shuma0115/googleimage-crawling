@@ -1043,16 +1043,17 @@
 
     const isPageVisible = () => !document.hidden;
 
-      const collectFromViewer = async (thumb, fallbackUrl = "") => {
-        const viewerUrl = isPageVisible() ? await waitForViewerUrl() : "";
-        logDebug("viewer url", viewerUrl || "(none)");
-        const candidates = viewerUrl ? [viewerUrl] : getThumbCandidates(thumb, fallbackUrl);
-        logDebug("candidates", candidates);
-        const filteredCandidates = candidates.filter(
+    const collectFromViewer = async (thumb, fallbackUrl = "") => {
+      const viewerUrl = isPageVisible() ? await waitForViewerUrl() : "";
+      logDebug("viewer url", viewerUrl || "(none)");
+      const candidates = viewerUrl ? [viewerUrl] : getThumbCandidates(thumb, fallbackUrl);
+      logDebug("candidates", candidates);
+      const allowHiddenData = !viewerUrl && document.hidden;
+      const filteredCandidates = candidates.filter(
         (value) =>
           value &&
           !value.startsWith("blob:") &&
-          (!viewerUrl || !value.startsWith("data:")) &&
+          (allowHiddenData || viewerUrl || !value.startsWith("data:")) &&
           !isThumbnailUrl(value)
       );
       logDebug("filtered candidates", filteredCandidates);
@@ -1074,7 +1075,6 @@
           logDebug("skip small data url", resolved);
           continue;
         }
-        const allowHiddenData = !viewerUrl && document.hidden;
         if (!viewerUrl && resolved.startsWith("data:") && !allowHiddenData) {
           logDebug("skip data url without viewer", resolved);
           continue;
